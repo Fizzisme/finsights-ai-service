@@ -1,0 +1,47 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python and tooling
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.ipynb_checkpoints/
+
+# Runtime and local artifacts
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.dagster/
+.langgraph_api/
+data/
+artifacts/
+checkpoints/
+!app/graph/checkpoints/
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.pdf
+*.sql.gz
+*.dump
+evals/reports/*
+!evals/reports/.gitkeep
+evals/snapshots/*
+!evals/snapshots/.gitkeep
+finetuning/datasets/*
+!finetuning/datasets/.gitkeep
