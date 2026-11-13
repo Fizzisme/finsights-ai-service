@@ -5,8 +5,9 @@ An AI service for financial research using agentic retrieval-augmented generatio
 combines FastAPI, LangChain, LangGraph, Voyage AI embeddings, and optional Jev
 decision services.
 
-**Status:** Repository scaffold. Directories contain `.gitkeep` placeholders.
-Application code, dependencies, API endpoints, and infrastructure are not implemented yet.
+**Status:** Initial API implementation. Health checks and stateless LangChain chat
+are available. RAG, LangGraph workflows, vision, and infrastructure integrations
+remain planned; their directories contain `.gitkeep` placeholders.
 
 ## Architecture
 
@@ -152,11 +153,64 @@ docs/
 ## Configuration and Development Status
 
 [`.env.example`](.env.example) lists proposed settings for model providers,
-Voyage AI, databases, Object Storage, Jev, and execution limits. It contains no
-credentials. A configuration loader has not been implemented.
+Voyage AI, databases, Object Storage, Jev, and execution limits. The LLM settings
+are implemented; the infrastructure settings are reserved for later work.
 
-There are currently no installation, startup, migration, or test commands.
-Dependency versions and lockfiles will be introduced with the first implementation.
+### Run Locally
+
+Install uv, then run from the repository root:
+
+```powershell
+uv sync --locked
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+```
+
+Copy the example only when `.env` does not already exist. Models are declared in
+[`app/models.json`](app/models.json) (override the path with `AI_MODELS_FILE`). Set the
+API key of each provider you want to use in `.env`:
+
+```dotenv
+ANTHROPIC_API_KEY=your-api-key
+OPENAI_API_KEY=your-api-key
+OPENAI_MODEL=your-model-id
+DEEPSEEK_API_KEY=your-api-key
+```
+
+`/chat` picks a model with the `profile` and `tier` query parameters. A profile is a
+provider (`anthropic`, `openai`, `deepseek`) and a tier is `strong`, `standard`
+(default) or `cheap`; `models.json` maps each pair to a model config. Each config
+names a dialect (`anthropic`, `openai_responses`, `openai_compat`) that
+`app/integrations/llm/factory.py` turns into a LangChain chat model. Keys are read
+from the environment variable named by `api_key_ref`, so they are not interchangeable
+between providers. Another OpenAI Chat Completions endpoint only needs a new
+`openai_compat` entry with its `base_url`; other protocols need their own LangChain
+integration.
+
+`.env` is not exported to the process environment, so pass it to uv:
+
+```powershell
+uv run --env-file .env uvicorn app.main:app --reload
+```
+
+Restart the server after changing `.env` or `models.json`; both are cached.
+Open `http://127.0.0.1:8000/docs`, or send a request:
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/chat?profile=deepseek&tier=cheap" -Method Post `
+  -ContentType 'application/json' -Body '{"message":"Hello"}'
+```
+
+`POST /chat` returns `{"answer":"..."}`. It is stateless and does not yet retrieve
+documents, use tools, stream tokens, or persist conversation history. Each request
+can incur provider charges. Provider/model selection is server-side.
+`GET /healthz` remains available without an API key.
+
+Chat returns 422 for invalid input, 503 for missing/invalid configuration, 502 for
+provider errors or empty output, and 504 for timeouts. Provider error details and
+credentials are not returned to clients.
+
+Run offline tests with `uv run python -m pytest`. These use simulated responses;
+a live provider call requires valid credentials. No database migrations exist yet.
 
 Keep credentials, source PDFs, raw financial data, database dumps, and model weights
 outside version control. Store large artifacts externally and track their identifiers or manifests.
