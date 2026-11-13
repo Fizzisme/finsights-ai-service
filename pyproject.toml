@@ -4,12 +4,24 @@ version = "0.1.0"
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "fastapi>=0.162.4",
+    "langchain>=1.5.0",
+    "langchain-anthropic>=1.7.10",
+    "langchain-openai>=1.7.4",
+    "pydantic-settings>=2.16.2",
     "uvicorn[standard]>=0.54.0",
 ]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
+    "httpx2>=2.16.0",
     "pyright>=1.1.414",
     "pytest>=9.2.0",
     "ruff>=0.17.4",
 ]
+
+[tool.pyright]
+include = ["app", "tests"]
+pythonVersion = "3.14"
+venvPath = "."
+venv = ".venv"
