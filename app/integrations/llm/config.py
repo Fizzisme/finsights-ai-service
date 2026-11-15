@@ -81,7 +81,7 @@ class ModelConfig(BaseModel):
     peak: PeakPricing | None = None
 
     @model_validator(mode="after")
-    def _check(self) -> "ModelConfig":
+    def _check(self) -> ModelConfig:
         if not self.capabilities.tool_calling:
             raise ValueError(
                 f"model config {self.id!r}: the agent loop needs native tool calling"

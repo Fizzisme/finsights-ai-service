@@ -30,7 +30,7 @@ class Catalog(BaseModel):
     profiles: dict[str, dict[Tier, str]]
 
     @model_validator(mode="after")
-    def _check(self) -> "Catalog":
+    def _check(self) -> Catalog:
         ids = [model.id for model in self.models]
         if len(set(ids)) != len(ids):
             raise ValueError(f"duplicate model ids: {sorted(ids)}")
