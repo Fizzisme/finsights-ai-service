@@ -11,12 +11,8 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from app.api.routes import chat, runs
-from app.graph.nodes.agent import (
-    AgentRunError,
-    RunResult,
-    ToolCallRecord,
-    run_agent,
-)
+from app.graph.nodes.agent import AgentRunError, RunResult, ToolCallRecord
+from app.graph.workflow import run_agent
 from app.main import app
 from app.prompts import load_prompt
 
@@ -101,6 +97,51 @@ async def test_prompt_file_and_tagged_question_are_sent() -> None:
 
 
 @pytest.mark.anyio
+async def test_unsupported_number_triggers_one_retry_with_feedback() -> None:
+    model = _model(
+        AIMessage(content="Lãi 999 tỷ."), AIMessage(content="Chưa có số liệu.")
+    )
+    out = await run_agent(model, [add], "VCB?", max_steps=5, max_retries=1)
+
+    assert out.answer == "Chưa có số liệu." and out.verified and out.unsupported == []
+    feedback = model.seen[1][-1]
+    assert feedback.type == "human" and "<verifier_feedback>" in str(feedback.content)
+    assert "999" in str(feedback.content)
+
+
+@pytest.mark.anyio
+async def test_still_unverified_after_retries_is_flagged_not_hidden() -> None:
+    model = _model(
+        AIMessage(content="Lãi 999 tỷ."), AIMessage(content="Vẫn lãi 999 tỷ.")
+    )
+    out = await run_agent(model, [add], "VCB?", max_steps=5, max_retries=1)
+
+    assert not out.verified and out.unsupported == ["999"]
+    assert out.answer == "Vẫn lãi 999 tỷ." and model.replies == []
+
+
+@pytest.mark.anyio
+async def test_zero_retries_never_loops_back() -> None:
+    model = _model(AIMessage(content="Lãi 999 tỷ."))
+    out = await run_agent(model, [add], "VCB?", max_steps=5, max_retries=0)
+    assert not out.verified and len(model.seen) == 1
+
+
+@pytest.mark.anyio
+async def test_tool_call_budget_blocks_extra_calls_but_agent_can_still_answer() -> None:
+    model = _model(
+        _call("add", {"a": 1, "b": 1}, "c1"),
+        _call("add", {"a": 2, "b": 2}, "c2"),
+        _call("add", {"a": 3, "b": 3}, "c3"),
+        AIMessage(content="Xong."),
+    )
+    out = await run_agent(model, [add], "q", max_steps=8, max_tool_calls=2)
+
+    assert out.answer == "Xong."
+    assert [c.ok for c in out.tool_calls] == [True, True, False]
+
+
+@pytest.mark.anyio
 async def test_max_steps_stops_a_looping_agent() -> None:
     model = _model(*[_call("add", {"a": 1, "b": 1}, f"c{i}") for i in range(10)])
     with pytest.raises(ModelCallLimitExceededError):
@@ -120,7 +161,9 @@ def client(monkeypatch):
 
 
 def _stub(monkeypatch, *, result=None, error=None):
-    async def fake(model, tools, question, *, max_steps, today=None):
+    async def fake(
+        model, tools, question, *, max_steps, max_retries=1, max_tool_calls=None, today=None
+    ):
         if error:
             raise error
         return result
@@ -141,6 +184,8 @@ def test_run_returns_answer_and_trace(client, monkeypatch):
     assert response.json() == {
         "answer": "Có 2 tin.",
         "tool_calls": [{"name": "search_news", "args": {"symbol": "VCB"}, "ok": True}],
+        "verified": True,
+        "unsupported": [],
     }
 
 

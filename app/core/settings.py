@@ -17,7 +17,9 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=60, gt=0, le=300)
 
     agent_max_steps: int = Field(default=8, ge=1, le=20)
+    agent_max_tool_calls: int = Field(default=6, ge=1, le=20)
     agent_timeout_seconds: float = Field(default=60, gt=0, le=300)
+    verifier_max_retries: int = Field(default=1, ge=0, le=3)
 
     mysql_source_readonly_dsn: SecretStr = SecretStr("")
 

@@ -1,7 +1,7 @@
 """The single agent loop: LangChain's create_agent (a compiled LangGraph graph).
 
 It runs model -> tool calls -> ToolMessage -> model ... until the model answers without
-tool calls. The router, verifier and fast-path nodes will wrap this node later.
+tool calls. The workflow graph wraps it with the verifier (see app/graph/workflow.py).
 """
 
 from collections.abc import Sequence
@@ -10,7 +10,10 @@ from datetime import date
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain.agents.middleware import (
+    ModelCallLimitMiddleware,
+    ToolCallLimitMiddleware,
+)
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -36,6 +39,8 @@ class ToolCallRecord:
 class RunResult:
     answer: str
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    verified: bool = True
+    unsupported: list[str] = field(default_factory=list)
 
 
 def build_user_message(question: str, today: date) -> HumanMessage:
@@ -47,19 +52,32 @@ def build_user_message(question: str, today: date) -> HumanMessage:
     )
 
 
-def build_agent(model: BaseChatModel, tools: Sequence[BaseTool], *, max_steps: int):
+def build_agent(
+    model: BaseChatModel,
+    tools: Sequence[BaseTool],
+    *,
+    max_steps: int,
+    max_tool_calls: int | None = None,
+):
+    middleware: list[Any] = [
+        # Hard stop against runaway loops (and cost): raises instead of ending silently.
+        ModelCallLimitMiddleware(run_limit=max_steps, exit_behavior="error")
+    ]
+    if max_tool_calls is not None:
+        # Calls over the budget are answered with an error ToolMessage, so the model
+        # can still write its final answer from what it already has.
+        middleware.append(
+            ToolCallLimitMiddleware(run_limit=max_tool_calls, exit_behavior="continue")
+        )
     return create_agent(
         model,
         tools=list(tools),
         system_prompt=load_prompt(PROMPT_NAME),
-        # Hard stop against runaway loops (and cost): raises instead of ending silently.
-        middleware=[
-            ModelCallLimitMiddleware(run_limit=max_steps, exit_behavior="error")
-        ],
+        middleware=middleware,
     )
 
 
-def _trace(messages: Sequence[BaseMessage]) -> list[ToolCallRecord]:
+def trace_tool_calls(messages: Sequence[BaseMessage]) -> list[ToolCallRecord]:
     status = {m.tool_call_id: m.status for m in messages if isinstance(m, ToolMessage)}
     return [
         ToolCallRecord(
@@ -71,22 +89,9 @@ def _trace(messages: Sequence[BaseMessage]) -> list[ToolCallRecord]:
     ]
 
 
-async def run_agent(
-    model: BaseChatModel,
-    tools: Sequence[BaseTool],
-    question: str,
-    *,
-    max_steps: int,
-    today: date | None = None,
-) -> RunResult:
-    agent = build_agent(model, tools, max_steps=max_steps)
-    state = await agent.ainvoke(
-        {"messages": [build_user_message(question, today or date.today())]}
-    )
-    messages: list[BaseMessage] = state["messages"]
+def final_answer(messages: Sequence[BaseMessage]) -> str:
+    """Text of the last message, which must be a plain AI answer (no pending tool calls)."""
     final = messages[-1]
     if not isinstance(final, AIMessage) or final.tool_calls:
         raise AgentRunError("agent did not finish with an answer")
-    return RunResult(
-        answer=StrOutputParser().invoke(final), tool_calls=_trace(messages)
-    )
+    return StrOutputParser().invoke(final)

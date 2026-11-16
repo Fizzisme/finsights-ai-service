@@ -14,8 +14,10 @@ from openai import APITimeoutError as OpenAITimeoutError
 
 from app.api.routes.chat import configured_model
 from app.core.settings import get_settings
-from app.graph.nodes.agent import AgentRunError, run_agent
+from app.graph.nodes.agent import AgentRunError
+from app.graph.workflow import run_agent
 from app.schemas.runs import RunRequest, RunResponse, ToolCallTrace
+from app.tools.calculator.calculate import calculate_tool
 from app.tools.sql.news_tool import search_news_tool
 
 router = APIRouter()
@@ -37,9 +39,11 @@ async def create_run(
         async with asyncio.timeout(settings.agent_timeout_seconds):
             result = await run_agent(
                 model,
-                [search_news_tool],
+                [search_news_tool, calculate_tool],
                 request.question,
                 max_steps=settings.agent_max_steps,
+                max_retries=settings.verifier_max_retries,
+                max_tool_calls=settings.agent_max_tool_calls,
             )
     except TimeoutError, OpenAITimeoutError, AnthropicTimeoutError:
         raise HTTPException(
@@ -61,4 +65,6 @@ async def create_run(
         tool_calls=[
             ToolCallTrace(name=c.name, args=c.args, ok=c.ok) for c in result.tool_calls
         ],
+        verified=result.verified,
+        unsupported=result.unsupported,
     )
