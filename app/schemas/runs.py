@@ -20,3 +20,6 @@ class ToolCallTrace(BaseModel):
 class RunResponse(BaseModel):
     answer: str
     tool_calls: list[ToolCallTrace]
+    # False when the answer still contains figures/dates no tool result supports.
+    verified: bool
+    unsupported: list[str]
