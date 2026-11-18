@@ -16,7 +16,10 @@ def test_no_filters_only_published_and_limit() -> None:
 
 def test_user_values_are_bound_never_inlined() -> None:
     args = NewsSearchInput(
-        symbol="vcb", query="x'; DROP TABLE a;--", date_from=date(2026, 1, 1), date_to=date(2026, 1, 31)
+        symbol="vcb",
+        query="x'; DROP TABLE a;--",
+        date_from=date(2026, 1, 1),
+        date_to=date(2026, 1, 31),
     )
     sql, params = mod._build_articles_query(args)
     assert "DROP" not in sql and "VCB" not in sql
@@ -47,7 +50,9 @@ def test_like_wildcards_escaped() -> None:
 async def test_search_news_assembles_articles(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def fake_fetch_all(sql: str, params: dict[str, Any] | None = None) -> list[dict]:
+    async def fake_fetch_all(
+        sql: str, params: dict[str, Any] | None = None
+    ) -> list[dict]:
         calls.append((sql, params or {}))
         if "MAX(published_at)" in sql:
             return [{"latest": datetime(2026, 5, 2, 1, 0)}]
@@ -89,7 +94,9 @@ async def test_search_news_assembles_articles(monkeypatch: pytest.MonkeyPatch) -
 async def test_no_rows_skips_second_query(monkeypatch: pytest.MonkeyPatch) -> None:
     n = 0
 
-    async def fake_fetch_all(sql: str, params: dict[str, Any] | None = None) -> list[dict]:
+    async def fake_fetch_all(
+        sql: str, params: dict[str, Any] | None = None
+    ) -> list[dict]:
         nonlocal n
         n += 1
         return []
@@ -114,7 +121,9 @@ def test_publisher_rejects_injection_chars() -> None:
 @pytest.mark.anyio
 async def test_data_as_of_hidden_for_a_complete_period(monkeypatch) -> None:
     # Newest article: 2026-11-17 05:10 UTC = 17/11 12:10 in Vietnam.
-    async def fake_fetch_all(sql: str, params: dict[str, Any] | None = None) -> list[dict]:
+    async def fake_fetch_all(
+        sql: str, params: dict[str, Any] | None = None
+    ) -> list[dict]:
         return [{"latest": datetime(2026, 11, 17, 5, 10)}]
 
     monkeypatch.setattr(mod, "fetch_all", fake_fetch_all)
@@ -136,16 +145,41 @@ def test_article_for_model_is_compact() -> None:
         url="https://example.com/7",
         content_rights="link_only",
         symbols=[
-            NewsSecurityMatch(symbol="VCB", match_method="ticker_boundary", review_status="auto", confidence=0.98),
-            NewsSecurityMatch(symbol="TCB", match_method="company_phrase", review_status="pending", confidence=0.97),
-            NewsSecurityMatch(symbol="MBB", match_method="ticker_boundary", review_status="auto", confidence=0.5),
+            NewsSecurityMatch(
+                symbol="VCB",
+                match_method="ticker_boundary",
+                review_status="auto",
+                confidence=0.98,
+            ),
+            NewsSecurityMatch(
+                symbol="TCB",
+                match_method="company_phrase",
+                review_status="pending",
+                confidence=0.97,
+            ),
+            NewsSecurityMatch(
+                symbol="MBB",
+                match_method="ticker_boundary",
+                review_status="auto",
+                confidence=0.5,
+            ),
         ],
     )
     view = mod.article_for_model(article)
-    assert set(view) == {"title", "summary", "published_at", "publisher", "url", "tickers", "tickers_unconfirmed"}
+    assert set(view) == {
+        "title",
+        "summary",
+        "published_at",
+        "publisher",
+        "url",
+        "tickers",
+        "tickers_unconfirmed",
+    }
     assert view["tickers"] == ["VCB"] and view["tickers_unconfirmed"] == ["TCB", "MBB"]
     assert len(view["summary"]) == mod.SUMMARY_CHARS_FOR_MODEL + 1  # plus the ellipsis
     assert view["published_at"] == "2026-05-01T08:00:00+07:00"
 
-    plain = mod.article_for_model(article.model_copy(update={"symbols": [], "summary": None}))
+    plain = mod.article_for_model(
+        article.model_copy(update={"symbols": [], "summary": None})
+    )
     assert "tickers_unconfirmed" not in plain and plain["summary"] is None

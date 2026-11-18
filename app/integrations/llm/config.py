@@ -87,7 +87,9 @@ class ModelConfig(BaseModel):
                 f"model config {self.id!r}: the agent loop needs native tool calling"
             )
         if self.fallbacks is not None and self.dialect != "anthropic":
-            raise ValueError(f"model config {self.id!r}: fallbacks is an anthropic-only option")
+            raise ValueError(
+                f"model config {self.id!r}: fallbacks is an anthropic-only option"
+            )
         return self
 
 
@@ -99,4 +101,6 @@ def resolve_api_key(ref: str) -> str:
         if not value:
             raise ModelConfigError(f"API key variable {name} is not set")
         return value
-    raise ModelConfigError(f"unsupported api_key_ref scheme {scheme!r} (supported: env)")
+    raise ModelConfigError(
+        f"unsupported api_key_ref scheme {scheme!r} (supported: env)"
+    )
