@@ -43,12 +43,17 @@ class RunResult:
     unsupported: list[str] = field(default_factory=list)
 
 
-def build_user_message(question: str, today: date) -> HumanMessage:
-    """Wrap the question in source tags so the model treats it as data, not rules."""
+def build_user_message(question: str, today: date, history: str = "") -> HumanMessage:
+    """Wrap the question in source tags so the model treats it as data, not rules.
+
+    `history` is an already-escaped `<conversation_history>` block (app/graph/history.py).
+    """
     # A question cannot close the tag early and smuggle text outside it.
     safe = question.replace("</untrusted_input>", "")
+    context = f"{history}\n" if history else ""
     return HumanMessage(
-        f"<today>{today.isoformat()}</today>\n<untrusted_input>\n{safe}\n</untrusted_input>"
+        f"<today>{today.isoformat()}</today>\n{context}"
+        f"<untrusted_input>\n{safe}\n</untrusted_input>"
     )
 
 

@@ -56,10 +56,10 @@ Lưu asset_uid và provenance xuyên suốt để có thể ingest lại và tru
 | Nơi lưu | Vai trò dự kiến |
 | --- | --- |
 | OCI | PDF, HTML, ảnh gốc |
-| MySQL Node 1: finsights_assets / market / news | Nguồn nghiệp vụ hiện có; online chỉ đọc |
+| MySQL Node 2: finsights_assets / market / news | Nguồn nghiệp vụ hiện có; online chỉ đọc |
 | MySQL market: provider=finsights_vision | Đầu ra vision; worker dùng quyền ghi riêng |
-| MySQL Node 2: finsights_scraping | Audit crawler hiện có, không tạo lại ở service AI |
-| MySQL Node 2: finsights_ai | Chat sessions/messages, tool calls, citations |
+| MySQL Node 1: finsights_scraping | Audit crawler hiện có, không tạo lại ở service AI |
+| MySQL Node 1: finsights_ai | Chat sessions/messages, tool calls; xem [chat-sessions.md](chat-sessions.md) |
 | Postgres: finsights_rag | Document pages, chunks, metadata, vectors và lexical index |
 | LangGraph checkpoint store | State thực thi; chọn backend khi triển khai, không đồng nhất với chat history |
 

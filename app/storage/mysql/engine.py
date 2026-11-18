@@ -25,6 +25,22 @@ def get_engine() -> AsyncEngine:
     )
 
 
+@lru_cache
+def get_chat_engine() -> AsyncEngine:
+    """Chat history on Node 1; unlike the source engine it writes."""
+    dsn = get_settings().mysql_chat_dsn.get_secret_value()
+    if not dsn:
+        raise RuntimeError("MYSQL_CHAT_DSN is not set")
+    return create_async_engine(
+        dsn,
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=0,
+        pool_recycle=1800,
+        connect_args={"connect_timeout": 10},
+    )
+
+
 async def fetch_all(sql: str, params: dict | None = None) -> list[dict]:
     async with get_engine().connect() as conn:
         result = await conn.execute(text(sql), params or {})

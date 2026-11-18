@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     verifier_max_retries: int = Field(default=1, ge=0, le=3)
 
     mysql_source_readonly_dsn: SecretStr = SecretStr("")
+    # Node 1 finsights_ai: chat sessions and messages (read/write account).
+    mysql_chat_dsn: SecretStr = SecretStr("")
 
 
 @lru_cache
