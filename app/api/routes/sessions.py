@@ -10,6 +10,7 @@ import logging
 import time
 import uuid
 from dataclasses import asdict
+from datetime import date
 from typing import Annotated, Any
 
 from anthropic import APIError as AnthropicAPIError
@@ -24,9 +25,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.api.routes.chat import configured_model
 from app.api.routes.runs import NEWS_TOOLS
 from app.core.settings import get_settings
-from app.graph.history import KEEP_RECENT_TURNS, build_digest
+from app.graph import compaction
+from app.graph.history import MAX_UNFOLDED_TURNS, Context, Digest, build_digest, to_fold
 from app.graph.nodes.agent import AgentRunError, RunResult
 from app.graph.workflow import run_agent
+from app.integrations.llm.config import ModelConfigError
+from app.integrations.llm.factory import get_chat_model
 from app.schemas.runs import ToolCallTrace
 from app.schemas.sessions import (
     MessageRequest,
@@ -68,6 +72,38 @@ async def _session(user: str, session_uid: str) -> dict[str, Any]:
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found.")
     return session
+
+
+def compactor_model(profile: str) -> BaseChatModel | None:
+    """The cheap tier of the request's profile folds history; None disables folding."""
+    try:
+        return get_chat_model(profile, "cheap")
+    except ModelConfigError:
+        return None
+
+
+async def _compact(
+    compactor: BaseChatModel | None, context: Context | None, history: list[Digest]
+) -> tuple[Context | None, dict[str, Any] | None]:
+    """(new checkpoint or None, trace or None). Any failure means truncation instead."""
+    fold = to_fold(context, history)
+    if not fold or compactor is None:
+        return None, None
+    try:
+        async with asyncio.timeout(get_settings().llm_timeout_seconds):
+            result = await compaction.fold_turns(
+                compactor, context, fold, today=date.today()
+            )
+    except (
+        TimeoutError,
+        OpenAITimeoutError,
+        AnthropicTimeoutError,
+        OpenAIAPIError,
+        AnthropicAPIError,
+    ) as exc:
+        logger.warning("compaction failed: %s", type(exc).__name__)
+        return None, {"folded_turns": [d["turn"] for d in fold], "ok": False}
+    return result.context, compaction.trace(result)
 
 
 def _failure(exc: Exception) -> tuple[int, str, str]:
@@ -138,10 +174,15 @@ async def send_message(
     session_uid: str,
     request: MessageRequest,
     model: Annotated[BaseChatModel, Depends(configured_model)],
+    compactor: Annotated[BaseChatModel | None, Depends(compactor_model)],
 ) -> TurnResponse:
     session = await _session(user, session_uid)
     try:
-        history = await chat_store.recent_digests(session["id"], KEEP_RECENT_TURNS)
+        context = await chat_store.latest_context(session["id"])
+        through = context["through_turn"] if context else 0
+        history = await chat_store.digests_after(
+            session["id"], through, MAX_UNFOLDED_TURNS
+        )
     except SQLAlchemyError, RuntimeError:
         logger.exception("loading chat history failed")
         raise HTTPException(status_code=503, detail=UNAVAILABLE) from None
@@ -149,6 +190,14 @@ async def send_message(
     settings = get_settings()
     model_name = getattr(model, "model_name", None) or getattr(model, "model", None)
     started = time.monotonic()
+    # Fold old turns before the run, so this turn already reads the smaller history.
+    checkpoint, fold_trace = await _compact(compactor, context, history)
+    context = checkpoint or context
+    extra: dict[str, Any] = {}
+    if fold_trace:
+        extra["compaction"] = fold_trace
+    if checkpoint:
+        extra["context"] = checkpoint  # later turns resume from here
     try:
         async with asyncio.timeout(settings.agent_timeout_seconds):
             result: RunResult = await run_agent(
@@ -159,6 +208,7 @@ async def send_message(
                 max_retries=settings.verifier_max_retries,
                 max_tool_calls=settings.agent_max_tool_calls,
                 history=history,
+                context=context,
             )
         if not result.answer.strip():
             raise AgentRunError("empty answer")
@@ -184,6 +234,7 @@ async def send_message(
                 ai_trace={
                     "digest": build_digest(request.question, detail, verified=False),
                     "latency_ms": int((time.monotonic() - started) * 1000),
+                    **extra,
                 },
             )
         except HTTPException:
@@ -208,6 +259,7 @@ async def send_message(
             "latency_ms": int((time.monotonic() - started) * 1000),
             # No column for it in finsights_ai: prompt_tokens includes these cache hits.
             "cache_read_tokens": result.cache_read_tokens,
+            **extra,
         },
     )
     return TurnResponse(

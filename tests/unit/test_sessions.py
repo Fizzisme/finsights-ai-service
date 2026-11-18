@@ -32,13 +32,19 @@ class FakeStore:
         }
         self.saved: list[dict[str, Any]] = []
         self.digests: list[dict[str, Any]] = []
+        self.context: dict[str, Any] | None = None
         self.fail_save: Exception | None = None
 
     async def get_session(self, user: str, uid: str) -> dict[str, Any] | None:
         return self.sessions.get((user, uid))
 
-    async def recent_digests(self, session_id: int, limit: int) -> list[dict[str, Any]]:
-        return self.digests[-limit:]
+    async def latest_context(self, session_id: int) -> dict[str, Any] | None:
+        return self.context
+
+    async def digests_after(
+        self, session_id: int, after_turn: int, limit: int
+    ) -> list[dict[str, Any]]:
+        return [d for d in self.digests if d["turn"] > after_turn][-limit:]
 
     async def save_turn(self, session: dict[str, Any], **turn: Any) -> int:
         if self.fail_save:
@@ -58,7 +64,8 @@ def store(monkeypatch) -> FakeStore:
     fake = FakeStore()
     for name in (
         "get_session",
-        "recent_digests",
+        "latest_context",
+        "digests_after",
         "save_turn",
         "create_session",
         "delete_session",
@@ -70,6 +77,8 @@ def store(monkeypatch) -> FakeStore:
 @pytest.fixture
 def client():
     app.dependency_overrides[chat.configured_model] = lambda: object()
+    # No compaction unless a test turns it on.
+    app.dependency_overrides[sessions.compactor_model] = lambda: None
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
@@ -166,10 +175,10 @@ def test_concurrent_turn_is_a_conflict(client, store, monkeypatch):
 def test_history_db_down_is_unavailable_and_runs_nothing(client, store, monkeypatch):
     calls = _stub_agent(monkeypatch, result=RunResult("x"))
 
-    async def down(session_id: int, limit: int):
+    async def down(session_id: int, *args: Any):
         raise OperationalError("SELECT", {}, Exception("host 1.2.3.4"))
 
-    monkeypatch.setattr(chat_store, "recent_digests", down)
+    monkeypatch.setattr(chat_store, "digests_after", down)
     response = _ask(client)
     assert response.status_code == 503 and "1.2.3.4" not in response.text
     assert calls == []
@@ -219,3 +228,91 @@ def test_token_usage_is_summed_and_saved(client, store, monkeypatch):
     assert store.saved[0]["prompt_tokens"] == 200
     assert store.saved[0]["completion_tokens"] == 40
     assert store.saved[0]["ai_trace"]["cache_read_tokens"] == 80
+
+
+# --- compaction --------------------------------------------------------------------------
+
+
+def _long_digests(n: int) -> list[dict[str, Any]]:
+    from app.graph.history import build_digest
+
+    return [
+        {
+            "turn": t,
+            **build_digest(f"q{t} " + "y" * 390, f"a{t} " + "x" * 590, verified=True),
+        }
+        for t in range(1, n + 1)
+    ]
+
+
+def _compaction_on(monkeypatch, fold_turns) -> None:
+    from app.graph import history
+
+    monkeypatch.setattr(history, "HISTORY_TOKENS", 1000)  # ~340 tokens per digest
+    app.dependency_overrides[sessions.compactor_model] = lambda: object()
+    monkeypatch.setattr(sessions.compaction, "fold_turns", fold_turns)
+
+
+def test_long_session_is_folded_and_checkpoint_saved(client, store, monkeypatch):
+    from app.graph.compaction import FoldResult
+    from app.graph.history import merge_context
+
+    store.digests = _long_digests(6)
+    folded: list[list[int]] = []
+
+    async def fake_fold(model, context, fold, *, today):
+        folded.append([d["turn"] for d in fold])
+        return FoldResult(
+            context=merge_context(context, fold, "Lượt 1-3: tóm tắt."),
+            folded_turns=[d["turn"] for d in fold],
+            attempts=1,
+        )
+
+    _compaction_on(monkeypatch, fake_fold)
+    calls = _stub_agent(monkeypatch, result=RunResult("Có 2 tin."))
+    assert _ask(client).status_code == 200
+
+    assert folded == [[1, 2, 3]]  # all but the 3 most recent turns
+    assert calls[0]["context"]["through_turn"] == 3
+    trace = store.saved[0]["ai_trace"]
+    assert trace["context"]["summary"] == "Lượt 1-3: tóm tắt."
+    assert trace["compaction"] == {
+        "folded_turns": [1, 2, 3],
+        "ok": True,
+        "attempts": 1,
+        "unsupported": [],
+    }
+
+
+def test_failed_fold_falls_back_and_still_answers(client, store, monkeypatch):
+    from openai import APITimeoutError
+
+    store.digests = _long_digests(6)
+
+    async def broken_fold(model, context, fold, *, today):
+        raise APITimeoutError(request=None)  # type: ignore[arg-type]
+
+    _compaction_on(monkeypatch, broken_fold)
+    calls = _stub_agent(monkeypatch, result=RunResult("Có 2 tin."))
+    assert _ask(client).status_code == 200
+
+    assert calls[0]["context"] is None
+    trace = store.saved[0]["ai_trace"]
+    assert "context" not in trace
+    assert trace["compaction"] == {"folded_turns": [1, 2, 3], "ok": False}
+
+
+def test_saved_checkpoint_is_resumed(client, store, monkeypatch):
+    from app.graph.history import merge_context
+
+    store.digests = _long_digests(5)
+    store.context = merge_context(None, store.digests[:3], "Lượt 1-3: tóm tắt.")
+    calls = _stub_agent(monkeypatch, result=RunResult("Có 2 tin."))
+    assert _ask(client).status_code == 200
+
+    assert calls[0]["context"]["through_turn"] == 3
+    assert [d["turn"] for d in calls[0]["history"]] == [
+        4,
+        5,
+    ]  # only unfolded turns loaded
+    assert "context" not in store.saved[0]["ai_trace"]  # nothing new folded

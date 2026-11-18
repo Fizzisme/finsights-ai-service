@@ -75,18 +75,44 @@ async def list_messages(session_id: int) -> list[dict[str, Any]]:
     )
 
 
-async def recent_digests(session_id: int, limit: int) -> list[dict[str, Any]]:
-    """Digests of the latest `limit` turns, each with its `turn`, oldest first."""
+def _json(value: Any) -> Any:
+    # aiomysql returns JSON columns as text.
+    return json.loads(value) if isinstance(value, str) else value
+
+
+async def latest_context(session_id: int) -> dict[str, Any] | None:
+    """The newest rolling-summary checkpoint, stored on the turn that folded it."""
+    rows = await _fetch(
+        "SELECT JSON_EXTRACT(ai_trace, '$.context') AS context FROM chat_messages "
+        "WHERE session_id = :sid AND speaker = :assistant AND turn IS NOT NULL "
+        "AND JSON_CONTAINS_PATH(ai_trace, 'one', '$.context') "
+        "ORDER BY turn DESC LIMIT 1",
+        {"sid": session_id, "assistant": ASSISTANT},
+    )
+    context = _json(rows[0]["context"]) if rows else None
+    return (
+        context if isinstance(context, dict) and context.get("through_turn") else None
+    )
+
+
+async def digests_after(
+    session_id: int, after_turn: int, limit: int
+) -> list[dict[str, Any]]:
+    """Digests of the latest `limit` turns after `after_turn`, each with its `turn`, oldest first."""
     rows = await _fetch(
         "SELECT turn, ai_trace FROM chat_messages "
-        "WHERE session_id = :sid AND speaker = :assistant AND turn IS NOT NULL "
+        "WHERE session_id = :sid AND speaker = :assistant AND turn > :after "
         "AND ai_trace IS NOT NULL ORDER BY turn DESC LIMIT :limit",
-        {"sid": session_id, "assistant": ASSISTANT, "limit": limit},
+        {
+            "sid": session_id,
+            "assistant": ASSISTANT,
+            "after": after_turn,
+            "limit": limit,
+        },
     )
     digests = []
     for row in reversed(rows):
-        trace = row["ai_trace"]
-        trace = json.loads(trace) if isinstance(trace, str) else trace
+        trace = _json(row["ai_trace"])
         if isinstance(trace, dict) and isinstance(trace.get("digest"), dict):
             digests.append({"turn": row["turn"], **trace["digest"]})
     return digests

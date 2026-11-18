@@ -14,7 +14,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, MessagesState, StateGraph
 
-from app.graph.history import history_block, history_sources, select_window
+from app.graph.history import fit, history_block, history_sources
 from app.graph.nodes.agent import (
     RunResult,
     build_agent,
@@ -88,10 +88,15 @@ async def run_agent(
     max_tool_calls: int | None = None,
     today: date | None = None,
     history: Sequence[dict[str, Any]] = (),
+    context: dict[str, Any] | None = None,
 ) -> RunResult:
-    """One turn. `history` holds digests of earlier turns of the same chat session."""
+    """One turn of a chat session.
+
+    `history` holds digests of earlier turns; `context` is the rolling summary of the turns
+    folded so far (app/graph/history.py). Turns that still do not fit are truncated.
+    """
     today = today or date.today()
-    window = select_window(history)
+    turns = fit(context, history)
     graph = build_workflow(
         model,
         tools,
@@ -100,11 +105,13 @@ async def run_agent(
         max_steps=max_steps,
         max_retries=max_retries,
         max_tool_calls=max_tool_calls,
-        sources=history_sources(window),
+        sources=history_sources(context, turns),
     )
     state = await graph.ainvoke(
         {
-            "messages": [build_user_message(question, today, history_block(window))],
+            "messages": [
+                build_user_message(question, today, history_block(context, turns))
+            ],
             "retries": 0,
             "verification": {},
         }

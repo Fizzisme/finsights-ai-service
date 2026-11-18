@@ -1,7 +1,7 @@
 # Chat sessions và lịch sử hội thoại
 
-Trạng thái: **giai đoạn 1 đã triển khai** (nhiều lượt, lưu lịch sử, cửa sổ trượt).
-Compaction bằng LLM để sang giai đoạn 2.
+Trạng thái: **đã triển khai**: nhiều lượt, lưu lịch sử, cửa sổ trượt và compaction
+(rolling summary) theo cơ chế của BOA.
 
 ## Vấn đề
 
@@ -18,10 +18,13 @@ trước, verifier phải chấp nhận nó, nếu không agent sẽ bị chặn
 1. **Digest do code tạo, không dùng LLM.** Mỗi lượt để lại một digest ngắn: câu
    hỏi, câu trả lời (cắt ở 400 và 600 ký tự), các *fact đã kiểm chứng* (số, ngày,
    link). Không mang trace tool hay toàn văn tool result sang lượt sau.
-2. **Cửa sổ trượt.** Lượt mới đọc digest của `KEEP_RECENT_TURNS = 3` lượt gần nhất.
-3. **Ngân sách cố định.** Lịch sử đưa vào model tối đa `HISTORY_TOKENS = 2000`
-   (ước lượng 3 ký tự/token vì tiếng Việt tốn token). Vượt ngân sách thì bỏ digest
-   cũ nhất, luôn giữ lượt mới nhất; lượt mới không bao giờ fail vì lịch sử dài.
+2. **Ngân sách cố định.** Lịch sử đưa vào model tối đa `HISTORY_TOKENS = 2000`
+   (ước lượng 3 ký tự/token vì tiếng Việt tốn token): bản tóm tắt các lượt cũ
+   (`earlier`) cộng digest nguyên văn của các lượt chưa gấp (`turns`).
+3. **Gấp khi vượt ngân sách (compaction).** Các lượt trước `KEEP_RECENT_TURNS = 3`
+   lượt gần nhất được gấp vào rolling summary (xem mục Compaction). Gấp lỗi thì
+   quay về cắt bớt: bỏ digest cũ nhất, luôn giữ lượt mới nhất. Lượt mới không bao
+   giờ fail vì lịch sử dài.
 4. **Fact cũ là nguồn hợp lệ.** Câu hỏi và fact của các lượt trong cửa sổ được
    verifier chấp nhận như tool result (kể cả làm input cho `calculate`). Chỉ lượt
    có `verified = true` mới để lại fact, nên con số chưa kiểm chứng không lan sang
@@ -30,7 +33,8 @@ trước, verifier phải chấp nhận nó, nếu không agent sẽ bị chặn
    lấy từ bài báo, nên được bọc trong `<conversation_history>` (không thể tự đóng
    thẻ) và prompt coi nó như `<untrusted_input>`.
 
-Code: `app/graph/history.py` (digest, cửa sổ, block, nguồn cho verifier).
+Code: `app/graph/history.py` (digest, cửa sổ, block, nguồn cho verifier),
+`app/graph/compaction.py` + `app/prompts/compactor.md` (gấp).
 
 ## Mô hình dữ liệu (MySQL `finsights_ai`, Node 1)
 
@@ -51,7 +55,7 @@ lưu UTC (server `time_zone = UTC`).
 | `message_status` | `complete` \| `failed` |
 | `model_name`, `error_code` | Dòng assistant; `error_code` = `timeout` \| `no_answer` \| `provider_error` |
 | `turn` | Số lượt trong phiên; unique `(session_id, turn, speaker)` chặn hai request ghi cùng một lượt |
-| `ai_trace` (JSON) | Dòng assistant: `digest`, `tool_calls`, `verified`, `unsupported`, `latency_ms` |
+| `ai_trace` (JSON) | Dòng assistant: `digest`, `tool_calls`, `verified`, `unsupported`, `latency_ms`, `cache_read_tokens`; khi lượt có gấp: `compaction` (kết quả) và `context` (checkpoint mới) |
 | `prompt_tokens`, `completion_tokens` | Dòng assistant: tổng token mọi lần gọi model trong lượt |
 
 `ai_trace.digest` ví dụ:
@@ -93,13 +97,14 @@ trả với `turn = null`.
 ```
 POST /sessions/{uid}/messages
   1. Tải phiên theo (session_uid, user_uid, active); không có -> 404
-  2. Tải digest 3 lượt gần nhất -> cửa sổ (cắt theo ngân sách)
-  3. User message = <today> + <conversation_history> + <untrusted_input>
-  4. run_agent(...); verifier nhận thêm câu hỏi và fact của cửa sổ
-  5. Tạo digest lượt mới bằng code
-  6. Một transaction: turn = MAX(turn) + 1, INSERT user + assistant,
+  2. Tải checkpoint mới nhất (ai_trace.context) và digest các lượt sau nó
+  3. Vượt ngân sách -> gấp các lượt trước 3 lượt gần nhất (model rẻ); lỗi -> cắt bớt
+  4. User message = <today> + <conversation_history> + <untrusted_input>
+  5. run_agent(...); verifier nhận thêm câu hỏi, fact của tóm tắt và các lượt
+  6. Tạo digest lượt mới bằng code; lưu checkpoint mới (nếu có) cùng lượt này
+  7. Một transaction: turn = MAX(turn) + 1, INSERT user + assistant,
      cập nhật title (nếu chưa có) và updated_at
-  7. Trả kết quả
+  8. Trả kết quả
 ```
 
 ## Kiểm chứng (2026-11-18)
@@ -112,12 +117,27 @@ Phiên thật trên Node 1, model `deepseek-v4-flash`:
 | 2 | Còn TCB thì sao? | `count_news` (tự suy ra tháng 10/2026) | 296 bài |
 | 3 | Vậy TCB nhiều hơn HPG bao nhiêu phần trăm? | chỉ `calculate`, input lấy từ lịch sử | 29,26%, `verified = true` |
 
-## Giai đoạn 2: compaction bằng LLM
+## Compaction (rolling summary)
 
-Khi có dữ liệu thật cho thấy phiên dài bị mất ngữ cảnh do cắt bớt: các lượt rơi
-khỏi cửa sổ được một model rẻ gấp thành rolling summary, lưu làm checkpoint
-(cần thêm cột qua coredb). Code kiểm mọi fact model giữ lại phải khớp y nguyên
-với digest gốc (như `facts_verifier` của BOA); gấp lỗi thì quay về cắt bớt.
+Theo cơ chế của BOA, với hai điều chỉnh:
+
+| | BOA | Finsights |
+| --- | --- | --- |
+| Model gấp viết | tóm tắt + danh sách fact (chép lại) | **chỉ** đoạn tóm tắt |
+| Fact của lượt đã gấp | model chép, code kiểm từng fact | **code mang theo y nguyên** (số, ngày, link), model không chạm |
+| Kiểm đoạn tóm tắt | không | verifier: mọi số/ngày phải có trong lượt được gấp hoặc tóm tắt cũ |
+| Checkpoint | cột trong `sessions` | `ai_trace.context` của lượt đã gấp (không đổi schema; bị xoá cùng phiên khi dọn) |
+
+- Model: tier `cheap` của cùng profile (`compactor_model`), prompt `compactor.md`.
+- Tóm tắt bị verifier từ chối hoặc dài quá 1.200 ký tự → gửi lại cho model một
+  lần kèm phản hồi (không bao giờ cắt cụt, vì lượt mới nhất nằm ở cuối). Vẫn lỗi,
+  hoặc provider lỗi/timeout → không gấp, lượt này cắt bớt như cũ.
+- Số lượt ("Lượt 2: …") là nguồn hợp lệ cho verifier. Đổi lại, số nguyên nhỏ
+  trùng số lượt sẽ không bị bắt.
+
+Kiểm chứng trên Node 1 (2026-11-18), phiên 10 lượt: gấp ở lượt 7 (lượt 1–3), 8,
+9, 10, mỗi lần qua verifier ngay lần đầu; tóm tắt giữ ở 600–1.000 ký tự; lượt 10
+hỏi lại con số của lượt 1 (đã chỉ còn trong tóm tắt) và trả đúng 229.
 
 ## Account và kết nối
 
