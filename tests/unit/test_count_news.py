@@ -55,7 +55,7 @@ async def test_count_news_groups(monkeypatch: pytest.MonkeyPatch) -> None:
             return [{"key_": "VCB", "n": 5}, {"key_": "TCB", "n": 2}]
         return [{"n": 6}]
 
-    async def fake_latest() -> datetime:
+    async def fake_latest(date_to=None) -> datetime:
         return datetime(2026, 11, 17, 5, 10)
 
     monkeypatch.setattr(mod, "fetch_all", fake)
@@ -75,7 +75,7 @@ async def test_zero_total_skips_groups_query(monkeypatch: pytest.MonkeyPatch) ->
         n += 1
         return [{"n": 0}]
 
-    async def no_data() -> None:
+    async def no_data(date_to=None) -> None:
         return None
 
     monkeypatch.setattr(mod, "fetch_all", fake)

@@ -33,6 +33,11 @@ class Case:
     note: str = ""
 
 
+# A past, complete period must not get the "news only available up to ..." note.
+_FRESHNESS = ["cập nhật đến", "dữ liệu đến", "chỉ có dữ liệu", "available up to", "updated to"]
+# Answers end with their last point, never with an offer (prompt: answer_format).
+_OFFERS = ("bạn có muốn", "would you like", "do you want")
+
 CASES: list[Case] = [
     Case("Tin mới nhất về VCB?", {"search_news"}, note="basic ticker search"),
     Case(
@@ -49,6 +54,7 @@ CASES: list[Case] = [
         "Tháng 10/2026 có bao nhiêu bài viết về HPG?",
         {"count_news"},
         forbid_tools={"search_news"},
+        must_not_contain=_FRESHNESS,
         note="count must not be done by listing",
     ),
     Case(
@@ -145,6 +151,7 @@ EDGE_CASES: list[Case] = [
         "How many articles mentioned HPG in October 2026?",
         {"count_news"},
         must_contain=["229"],
+        must_not_contain=_FRESHNESS,
         note="English count question; 229 checked against the DB on 2026-11-18",
     ),
     Case(
@@ -242,6 +249,8 @@ def check(case: Case, out: dict) -> list[str]:
     calls = out["tool_calls"]
     called = {c["name"] for c in calls}
     answer = out["answer"].lower()
+    if offer := next((o for o in _OFFERS if o in answer), None):
+        problems.append(f"answer ends with an offer ({offer!r})")
 
     if case.no_tools and called:
         problems.append(f"expected no tool calls, got {sorted(called)}")

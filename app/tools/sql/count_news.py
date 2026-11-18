@@ -104,7 +104,7 @@ async def count_news(args: CountNewsInput) -> CountNewsResult:
         rows = await fetch_all(sql, params)
         groups = [NewsCountGroup(key=str(r["key_"]), count=int(r["n"])) for r in rows]
     return CountNewsResult(
-        total=total, groups=groups, data_as_of=await latest_published_at()
+        total=total, groups=groups, data_as_of=await latest_published_at(args.date_to)
     )
 
 

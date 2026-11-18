@@ -97,3 +97,16 @@ def test_publisher_filter_bound_and_lowercased() -> None:
 def test_publisher_rejects_injection_chars() -> None:
     with pytest.raises(ValueError):
         NewsSearchInput(publisher="cafef' OR 1=1")
+
+
+@pytest.mark.anyio
+async def test_data_as_of_hidden_for_a_complete_period(monkeypatch) -> None:
+    # Newest article: 2026-11-17 05:10 UTC = 17/11 12:10 in Vietnam.
+    async def fake_fetch_all(sql: str, params: dict[str, Any] | None = None) -> list[dict]:
+        return [{"latest": datetime(2026, 11, 17, 5, 10)}]
+
+    monkeypatch.setattr(mod, "fetch_all", fake_fetch_all)
+    assert await mod.latest_published_at(date(2026, 10, 31)) is None  # October is over
+    assert await mod.latest_published_at(date(2026, 11, 17)) is not None  # same day
+    assert await mod.latest_published_at(date(2026, 11, 30)) is not None
+    assert await mod.latest_published_at(None) is not None
