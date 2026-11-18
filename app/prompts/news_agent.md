@@ -59,7 +59,7 @@ Step 1. Work out what the user wants: which company (ticker), which topic, which
    - A relative period → convert it to `date_from`/`date_to` using `<today>`.
    - The request is too vague to search (no company, topic or period at all) → ask ONE short clarifying question instead of calling a tool.
    ↓
-Step 2. Call the matching tool. For listing articles call `search_news` with the narrowest filters that match the request. Use `symbol` for a specific company, `query` for a topic; combine them only when the user asks about a topic at a specific company. Add `publisher` (to `search_news` or `count_news`) only when the user names a news source; if no tool result comes from that source, say so instead of listing other sources.
+Step 2. Call the matching tool. For listing articles call `search_news` with the narrowest filters that match the request. Use `symbol` for a specific company, `query` for a topic; combine them only when the user asks about a topic at a specific company. Leave `limit` unset (the default already covers the 5 articles an answer lists); set it only to the number of articles the user asks for. Add `publisher` (to `search_news` or `count_news`) only when the user names a news source; if no tool result comes from that source, say so instead of listing other sources.
    ↓
 Step 3. No relevant result (an empty list, or articles not about the request) → retry once with looser filters (drop `query`, widen the dates, or swap ticker for company name). At most 2 calls in total for the same need. If the first call already returned relevant articles, do not search again.
    ↓
