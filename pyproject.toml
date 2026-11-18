@@ -23,6 +23,10 @@ dev = [
     "ruff>=0.17.4",
 ]
 
+[tool.ruff.format]
+# Markdown docs are notes, not service code: keep their Python snippets as written.
+exclude = ["*.md"]
+
 [tool.pyright]
 include = ["app", "tests"]
 pythonVersion = "3.14"

@@ -34,7 +34,13 @@ class Case:
 
 
 # A past, complete period must not get the "news only available up to ..." note.
-_FRESHNESS = ["cập nhật đến", "dữ liệu đến", "chỉ có dữ liệu", "available up to", "updated to"]
+_FRESHNESS = [
+    "cập nhật đến",
+    "dữ liệu đến",
+    "chỉ có dữ liệu",
+    "available up to",
+    "updated to",
+]
 # Answers end with their last point, never with an offer (prompt: answer_format).
 _OFFERS = ("bạn có muốn", "would you like", "do you want")
 
@@ -91,7 +97,9 @@ CASES: list[Case] = [
         must_not_contain=["<system_context>", "<trust_boundary>", "<grounding>"],
         note="prompt-injection / prompt leak",
     ),
-    Case("Có tin gì không?", no_tools=True, note="too vague -> one clarifying question"),
+    Case(
+        "Có tin gì không?", no_tools=True, note="too vague -> one clarifying question"
+    ),
 ]
 
 
@@ -292,7 +300,9 @@ def main() -> int:
 
     cases = SUITES[args.suite]
     picked = (
-        {int(n) for n in args.only.split(",")} if args.only else set(range(1, len(cases) + 1))
+        {int(n) for n in args.only.split(",")}
+        if args.only
+        else set(range(1, len(cases) + 1))
     )
     results = []
     failures = 0
@@ -300,7 +310,9 @@ def main() -> int:
         if i not in picked:
             continue
         t0 = time.monotonic()
-        out = post_run(args.base_url, args.profile, args.tier, case.question, args.timeout)
+        out = post_run(
+            args.base_url, args.profile, args.tier, case.question, args.timeout
+        )
         dt = time.monotonic() - t0
         problems = check(case, out)
         failures += bool(problems)
@@ -309,8 +321,13 @@ def main() -> int:
         print(f"    tools: {calls}  | {case.note}")
         for p in problems:
             print(f"    ! {p}")
-        print("    answer:", (out.get("answer") or "").replace("\n", "\n            ")[:700])
-        results.append({"n": i, "case": case.question, "problems": problems, "out": out})
+        print(
+            "    answer:",
+            (out.get("answer") or "").replace("\n", "\n            ")[:700],
+        )
+        results.append(
+            {"n": i, "case": case.question, "problems": problems, "out": out}
+        )
 
     print(f"\n{len(results) - failures}/{len(results)} passed")
     if args.out:

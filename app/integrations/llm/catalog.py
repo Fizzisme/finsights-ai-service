@@ -43,7 +43,9 @@ class Catalog(BaseModel):
                 raise ValueError(f"profile {name!r} refers to unknown models {unknown}")
         return self
 
-    def select(self, profile: str, tier: Tier, effort: str | None = None) -> ModelConfig:
+    def select(
+        self, profile: str, tier: Tier, effort: str | None = None
+    ) -> ModelConfig:
         """The config for `tier` in `profile`, with env vars expanded and `effort` applied."""
         if profile not in self.profiles:
             raise ModelConfigError(f"unknown provider profile {profile!r}")

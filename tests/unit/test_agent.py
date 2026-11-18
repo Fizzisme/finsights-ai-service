@@ -162,7 +162,14 @@ def client(monkeypatch):
 
 def _stub(monkeypatch, *, result=None, error=None):
     async def fake(
-        model, tools, question, *, max_steps, max_retries=1, max_tool_calls=None, today=None
+        model,
+        tools,
+        question,
+        *,
+        max_steps,
+        max_retries=1,
+        max_tool_calls=None,
+        today=None,
     ):
         if error:
             raise error
