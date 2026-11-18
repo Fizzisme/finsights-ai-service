@@ -21,8 +21,9 @@ def test_user_values_are_bound_never_inlined() -> None:
     sql, params = mod._build_articles_query(args)
     assert "DROP" not in sql and "VCB" not in sql
     assert params["symbol"] == "VCB"
-    assert params["date_from"] == date(2026, 1, 1)
-    assert params["date_to_excl"] == date(2026, 2, 1)  # inclusive end -> next day
+    # Vietnam days -> UTC bounds; inclusive end -> start of the next VN day.
+    assert params["date_from"] == datetime(2025, 12, 31, 17, 0)
+    assert params["date_to_excl"] == datetime(2026, 1, 31, 17, 0)
 
 
 def test_like_wildcards_escaped() -> None:

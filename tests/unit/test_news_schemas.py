@@ -69,3 +69,15 @@ def test_article_is_frozen_and_built_from_dict() -> None:
     with pytest.raises(ValidationError):
         article.title = "other"  # type: ignore[misc]
     assert NewsSearchResult(articles=[article]).articles[0] is article
+
+
+def test_published_at_utc_converted_to_vietnam_day() -> None:
+    article = NewsArticle(
+        article_uid="a1",
+        title="t",
+        published_at=datetime(2026, 10, 31, 20, 0),  # naive UTC from MySQL
+        publisher="CafeF",
+        url="https://example.com/a1",
+        content_rights="link_only",
+    )
+    assert article.published_at.isoformat() == "2026-11-01T03:00:00+07:00"

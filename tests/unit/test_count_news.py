@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pytest
@@ -25,7 +25,7 @@ def test_values_bound_and_dates_inclusive() -> None:
     sql, params = mod._build_total_query(args)
     assert "DROP" not in sql and "VCB" not in sql
     assert params["symbol"] == "VCB"
-    assert params["date_to_excl"] == date(2026, 2, 1)
+    assert params["date_to_excl"] == datetime(2026, 1, 31, 17, 0)
 
 
 def test_symbol_filter_with_symbol_grouping_restricts_joined_rows() -> None:
@@ -39,7 +39,8 @@ def test_symbol_filter_with_symbol_grouping_restricts_joined_rows() -> None:
 
 def test_day_grouping_sorted_by_date() -> None:
     sql, _ = mod._build_groups_query(CountNewsInput(group_by="day"))
-    assert "DATE(a.published_at)" in sql and "ORDER BY key_ ASC" in sql
+    assert "DATE(a.published_at + INTERVAL 7 HOUR)" in sql
+    assert "ORDER BY key_ ASC" in sql
 
 
 def test_invalid_range_rejected() -> None:

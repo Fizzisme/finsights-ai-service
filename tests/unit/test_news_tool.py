@@ -51,7 +51,8 @@ async def test_tool_validates_and_returns_json_dict(
     )
 
     assert seen[0].symbol == "VCB" and seen[0].limit == 3
-    assert out["articles"][0]["published_at"] == "2026-05-01T08:00:00"
+    # Stored UTC 08:00 -> Vietnam 15:00.
+    assert out["articles"][0]["published_at"] == "2026-05-01T15:00:00+07:00"
 
 
 @pytest.mark.anyio
