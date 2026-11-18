@@ -1,12 +1,29 @@
 from datetime import UTC, date, datetime, timedelta, timezone
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 # MySQL stores published_at as naive UTC. Users mean Vietnam calendar days
 # (UTC+7, no daylight saving), so filters and output are converted to it.
 VN_UTC_OFFSET = timedelta(hours=7)
 VN_TZ = timezone(VN_UTC_OFFSET, "Asia/Ho_Chi_Minh")
+
+
+def _utc_to_vn(v: datetime) -> datetime:
+    if v.tzinfo is None:
+        v = v.replace(tzinfo=UTC)
+    return v.astimezone(VN_TZ)
+
+
+# A datetime read from MySQL (naive UTC), exposed in Vietnam time (+07:00).
+VnDatetime = Annotated[datetime, AfterValidator(_utc_to_vn)]
 
 
 class NewsSearchInput(BaseModel):
@@ -90,25 +107,20 @@ class NewsArticle(BaseModel):
     article_uid: str
     title: str
     summary: str | None = None
-    # Exposed in Vietnam time (+07:00) so the date matches what the user sees.
-    published_at: datetime
+    published_at: VnDatetime
     publisher: str
     url: str
     content_rights: str
     symbols: list[NewsSecurityMatch] = Field(default_factory=list)
-
-    @field_validator("published_at")
-    @classmethod
-    def utc_to_vn(cls, v: datetime) -> datetime:
-        if v.tzinfo is None:
-            v = v.replace(tzinfo=UTC)
-        return v.astimezone(VN_TZ)
 
 
 class NewsSearchResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     articles: list[NewsArticle] = Field(default_factory=list)
+    # Publication time of the newest article in the whole database: news after
+    # this moment has not been collected yet.
+    data_as_of: VnDatetime | None = None
 
 
 class CountNewsInput(BaseModel):
@@ -187,6 +199,7 @@ class CountNewsResult(BaseModel):
     # several tickers counts once here, but once per ticker inside `groups`).
     total: int
     groups: list[NewsCountGroup] = Field(default_factory=list)
+    data_as_of: VnDatetime | None = None
 
 
 class GetNewsArticleInput(BaseModel):

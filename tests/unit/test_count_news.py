@@ -55,10 +55,15 @@ async def test_count_news_groups(monkeypatch: pytest.MonkeyPatch) -> None:
             return [{"key_": "VCB", "n": 5}, {"key_": "TCB", "n": 2}]
         return [{"n": 6}]
 
+    async def fake_latest() -> datetime:
+        return datetime(2026, 11, 17, 5, 10)
+
     monkeypatch.setattr(mod, "fetch_all", fake)
+    monkeypatch.setattr(mod, "latest_published_at", fake_latest)
     out = await mod.count_news(CountNewsInput(group_by="symbol"))
     assert out.total == 6
     assert [(g.key, g.count) for g in out.groups] == [("VCB", 5), ("TCB", 2)]
+    assert out.model_dump(mode="json")["data_as_of"] == "2026-11-17T12:10:00+07:00"
 
 
 @pytest.mark.anyio
@@ -70,7 +75,11 @@ async def test_zero_total_skips_groups_query(monkeypatch: pytest.MonkeyPatch) ->
         n += 1
         return [{"n": 0}]
 
+    async def no_data() -> None:
+        return None
+
     monkeypatch.setattr(mod, "fetch_all", fake)
+    monkeypatch.setattr(mod, "latest_published_at", no_data)
     out = await mod.count_news(CountNewsInput(group_by="publisher"))
     assert out == CountNewsResult(total=0) and n == 1
 

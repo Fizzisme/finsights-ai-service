@@ -13,7 +13,11 @@ from app.schemas.news import (
     NewsCountGroup,
 )
 from app.storage.mysql.engine import fetch_all
-from app.tools.sql.search_news import _escape_like, vn_day_start_utc
+from app.tools.sql.search_news import (
+    _escape_like,
+    latest_published_at,
+    vn_day_start_utc,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +103,9 @@ async def count_news(args: CountNewsInput) -> CountNewsResult:
         sql, params = _build_groups_query(args)
         rows = await fetch_all(sql, params)
         groups = [NewsCountGroup(key=str(r["key_"]), count=int(r["n"])) for r in rows]
-    return CountNewsResult(total=total, groups=groups)
+    return CountNewsResult(
+        total=total, groups=groups, data_as_of=await latest_published_at()
+    )
 
 
 @tool("count_news", args_schema=CountNewsInput)

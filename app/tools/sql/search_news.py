@@ -101,6 +101,15 @@ async def _fetch_matches(article_ids: list[int]) -> dict[int, list[NewsSecurityM
     return grouped
 
 
+async def latest_published_at() -> datetime | None:
+    """Newest publication time in the database, so the model can tell stale data."""
+    rows = await fetch_all(
+        "SELECT MAX(published_at) AS latest FROM news_articles "
+        "WHERE article_status = 'published'"
+    )
+    return rows[0]["latest"] if rows else None
+
+
 async def search_news(args: NewsSearchInput) -> NewsSearchResult:
     sql, params = _build_articles_query(args)
     rows = await fetch_all(sql, params)
@@ -119,7 +128,7 @@ async def search_news(args: NewsSearchInput) -> NewsSearchResult:
         )
         for row in rows
     ]
-    return NewsSearchResult(articles=articles)
+    return NewsSearchResult(articles=articles, data_as_of=await latest_published_at())
 
 
 @tool("search_news", args_schema=NewsSearchInput)

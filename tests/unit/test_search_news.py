@@ -37,6 +37,8 @@ async def test_search_news_assembles_articles(monkeypatch: pytest.MonkeyPatch) -
 
     async def fake_fetch_all(sql: str, params: dict[str, Any] | None = None) -> list[dict]:
         calls.append((sql, params or {}))
+        if "MAX(published_at)" in sql:
+            return [{"latest": datetime(2026, 5, 2, 1, 0)}]
         if "FROM news_articles" in sql:
             return [
                 {
@@ -63,7 +65,9 @@ async def test_search_news_assembles_articles(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(mod, "fetch_all", fake_fetch_all)
     result = await mod.search_news(NewsSearchInput(symbol="VCB"))
 
-    assert len(calls) == 2
+    assert len(calls) == 3  # articles, matches, data_as_of
+    assert result.data_as_of is not None
+    assert result.data_as_of.isoformat() == "2026-05-02T08:00:00+07:00"
     article = result.articles[0]
     assert article.article_uid == "uid-7"
     assert article.symbols[0].confidence == 0.95
@@ -79,8 +83,9 @@ async def test_no_rows_skips_second_query(monkeypatch: pytest.MonkeyPatch) -> No
         return []
 
     monkeypatch.setattr(mod, "fetch_all", fake_fetch_all)
-    assert (await mod.search_news(NewsSearchInput())).articles == []
-    assert n == 1
+    result = await mod.search_news(NewsSearchInput())
+    assert result.articles == [] and result.data_as_of is None
+    assert n == 2  # articles + data_as_of, no matches query
 
 
 def test_publisher_filter_bound_and_lowercased() -> None:
