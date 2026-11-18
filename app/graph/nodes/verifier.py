@@ -1,8 +1,8 @@
 """Deterministic verifier: every number and date in the answer must trace to a tool result.
 
-Supported = appears in a (non-error) tool result, in the user's question, is the result of
-a `calculate` call whose inputs are themselves supported, or is a trivial count of
-returned articles. Anything else is reported back so the agent can fix or drop it.
+Supported = appears in a (non-error) tool result, in the user's question, in a fact of an
+earlier verified turn of the same chat session, is the result of a `calculate` call whose
+inputs are themselves supported, or is a trivial count of returned articles. Anything else is reported back so the agent can fix or drop it.
 
 Known limits (by design, kept simple): no unit scaling ("1,2 tỷ" vs "1200 triệu"), no
 check that a number is attached to the right entity, and no verification of prose claims.
@@ -115,6 +115,16 @@ def _extract(text: str) -> _Extracted:
     return _Extracted(_NUMBER.findall(text), dates, day_months)
 
 
+def facts_of(text: str) -> dict[str, list[str]]:
+    """Numbers and dates `text` states, kept so a later turn may reuse them as a source."""
+    found = _extract(text)
+    return {
+        "numbers": list(dict.fromkeys(found.tokens)),
+        "dates": sorted(d.isoformat() for d in found.dates),
+        "day_months": sorted(f"{d:02d}/{m:02d}" for d, m in found.day_months),
+    }
+
+
 def _known_values(tokens: Sequence[str]) -> set[Decimal]:
     values: set[Decimal] = set()
     for token in tokens:
@@ -160,12 +170,13 @@ def verify_answer(
     *,
     question: str,
     today: date,
+    history_sources: Sequence[str] = (),
 ) -> VerifyResult:
     sources = [
         m for m in messages if isinstance(m, ToolMessage) and m.status != "error"
     ]
     data_texts = [_tool_text(m) for m in sources if m.name != CALCULATE_TOOL]
-    base = [_extract(t) for t in [*data_texts, question]]
+    base = [_extract(t) for t in [*data_texts, question, *history_sources]]
 
     allowed = _known_values([tok for e in base for tok in e.tokens])
     allowed_dates = {today, *(d for e in base for d in e.dates)}

@@ -14,11 +14,13 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, MessagesState, StateGraph
 
+from app.graph.history import history_block, history_sources, select_window
 from app.graph.nodes.agent import (
     RunResult,
     build_agent,
     build_user_message,
     final_answer,
+    token_usage,
     trace_tool_calls,
 )
 from app.graph.nodes.verifier import VerifyResult, feedback_message, verify_answer
@@ -38,11 +40,16 @@ def build_workflow(
     max_steps: int,
     max_retries: int,
     max_tool_calls: int | None = None,
+    sources: Sequence[str] = (),
 ):
     def verifier(state: RunState) -> dict[str, Any]:
         messages: Sequence[BaseMessage] = state["messages"]
         result = verify_answer(
-            final_answer(messages), messages, question=question, today=today
+            final_answer(messages),
+            messages,
+            question=question,
+            today=today,
+            history_sources=sources,
         )
         update: dict[str, Any] = {
             "verification": {
@@ -80,8 +87,11 @@ async def run_agent(
     max_retries: int = 1,
     max_tool_calls: int | None = None,
     today: date | None = None,
+    history: Sequence[dict[str, Any]] = (),
 ) -> RunResult:
+    """One turn. `history` holds digests of earlier turns of the same chat session."""
     today = today or date.today()
+    window = select_window(history)
     graph = build_workflow(
         model,
         tools,
@@ -90,10 +100,11 @@ async def run_agent(
         max_steps=max_steps,
         max_retries=max_retries,
         max_tool_calls=max_tool_calls,
+        sources=history_sources(window),
     )
     state = await graph.ainvoke(
         {
-            "messages": [build_user_message(question, today)],
+            "messages": [build_user_message(question, today, history_block(window))],
             "retries": 0,
             "verification": {},
         }
@@ -103,9 +114,12 @@ async def run_agent(
         passed=state["verification"]["passed"],
         unsupported=state["verification"]["unsupported"],
     )
+    input_tokens, output_tokens = token_usage(messages)
     return RunResult(
         answer=final_answer(messages),
         tool_calls=trace_tool_calls(messages),
         verified=verification.passed,
         unsupported=verification.unsupported,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )

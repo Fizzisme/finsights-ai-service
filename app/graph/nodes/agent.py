@@ -41,14 +41,37 @@ class RunResult:
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
     verified: bool = True
     unsupported: list[str] = field(default_factory=list)
+    # Summed over every model call of the run; None when the provider reports no usage.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
-def build_user_message(question: str, today: date) -> HumanMessage:
-    """Wrap the question in source tags so the model treats it as data, not rules."""
+def token_usage(messages: Sequence[BaseMessage]) -> tuple[int | None, int | None]:
+    """(input, output) tokens of all model calls in `messages`."""
+    usages = [
+        m.usage_metadata
+        for m in messages
+        if isinstance(m, AIMessage) and m.usage_metadata
+    ]
+    if not usages:
+        return None, None
+    return (
+        sum(u.get("input_tokens", 0) for u in usages),
+        sum(u.get("output_tokens", 0) for u in usages),
+    )
+
+
+def build_user_message(question: str, today: date, history: str = "") -> HumanMessage:
+    """Wrap the question in source tags so the model treats it as data, not rules.
+
+    `history` is an already-escaped `<conversation_history>` block (app/graph/history.py).
+    """
     # A question cannot close the tag early and smuggle text outside it.
     safe = question.replace("</untrusted_input>", "")
+    context = f"{history}\n" if history else ""
     return HumanMessage(
-        f"<today>{today.isoformat()}</today>\n<untrusted_input>\n{safe}\n</untrusted_input>"
+        f"<today>{today.isoformat()}</today>\n{context}"
+        f"<untrusted_input>\n{safe}\n</untrusted_input>"
     )
 
 

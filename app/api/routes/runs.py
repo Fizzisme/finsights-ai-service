@@ -26,6 +26,14 @@ from app.tools.sql.search_news import search_news_tool
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+NEWS_TOOLS = [
+    search_news_tool,
+    count_news_tool,
+    get_news_article_tool,
+    resolve_security_tool,
+    calculate_tool,
+]
+
 
 @router.get("/healthz")
 def healthz() -> dict:
@@ -42,13 +50,7 @@ async def create_run(
         async with asyncio.timeout(settings.agent_timeout_seconds):
             result = await run_agent(
                 model,
-                [
-                    search_news_tool,
-                    count_news_tool,
-                    get_news_article_tool,
-                    resolve_security_tool,
-                    calculate_tool,
-                ],
+                NEWS_TOOLS,
                 request.question,
                 max_steps=settings.agent_max_steps,
                 max_retries=settings.verifier_max_retries,
