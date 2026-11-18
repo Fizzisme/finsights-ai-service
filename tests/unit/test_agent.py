@@ -215,3 +215,30 @@ def test_empty_answer_is_bad_gateway(client, monkeypatch):
     assert (
         client.post("/runs?profile=openai", json={"question": "q"}).status_code == 502
     )
+
+
+@pytest.mark.anyio
+async def test_progress_events_follow_the_run() -> None:
+    # "99" has no source, so the verifier sends the answer back once.
+    model = _model(
+        _call("add", {"a": 2, "b": 3}), AIMessage(content="99"), AIMessage(content="5")
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    async def collect(name: str, data: dict[str, Any]) -> None:
+        events.append((name, data))
+
+    out = await run_agent(
+        model, [add], "2+3?", max_steps=5, max_retries=1, on_event=collect
+    )
+
+    assert out.answer == "5" and out.verified
+    assert events == [
+        ("tool_start", {"name": "add", "args": {"a": 2, "b": 3}}),
+        ("tool_end", {"name": "add", "ok": True}),
+        ("verifying", {}),
+        ("retrying", {}),
+        ("verifying", {}),
+    ]
+    # The rejected figure never reaches the client.
+    assert "99" not in str(events)

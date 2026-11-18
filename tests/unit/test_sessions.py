@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Any
 
@@ -316,3 +317,74 @@ def test_saved_checkpoint_is_resumed(client, store, monkeypatch):
         5,
     ]  # only unfolded turns loaded
     assert "context" not in store.saved[0]["ai_trace"]  # nothing new folded
+
+
+def _stream(client, headers=HEADERS) -> tuple[int, list[tuple[str, Any]]]:
+    """(status, [(event, data)]) of a streamed turn."""
+    response = client.post(
+        f"/sessions/{SID}/messages/stream?profile=openai",
+        json={"question": "Còn TCB?"},
+        headers=headers,
+    )
+    events = []
+    for block in response.text.split("\n\n"):
+        fields = dict(
+            line.split(": ", 1) for line in block.splitlines() if ": " in line
+        )
+        if "event" in fields:
+            events.append((fields["event"], json.loads(fields["data"])))
+    return response.status_code, events
+
+
+def test_stream_sends_progress_then_the_saved_answer(client, store, monkeypatch):
+    async def fake(model, tools, question, *, on_event, **kwargs):
+        await on_event("tool_start", {"name": "count_news", "args": {"symbol": "TCB"}})
+        await on_event("verifying", {})
+        return RunResult("TCB có 297 bài.")
+
+    monkeypatch.setattr(sessions, "run_agent", fake)
+    status, events = _stream(client)
+
+    assert status == 200
+    assert [name for name, _ in events] == ["tool_start", "verifying", "answer"]
+    answer = events[-1][1]
+    assert answer["answer"] == "TCB có 297 bài." and answer["turn"] == 1
+    assert store.saved[0]["status"] == chat_store.COMPLETE
+
+
+def test_stream_reports_a_failed_turn_as_an_event(client, store, monkeypatch):
+    _stub_agent(monkeypatch, error=AgentRunError("x"))
+    status, events = _stream(client)
+
+    assert status == 200  # the stream was already open
+    assert events == [
+        ("error", {"status": 502, "detail": "The agent did not reach an answer."})
+    ]
+    assert store.saved[0]["status"] == chat_store.FAILED
+
+
+def test_stream_folds_history_with_a_compacting_event(client, store, monkeypatch):
+    from app.graph.compaction import FoldResult
+    from app.graph.history import merge_context
+
+    store.digests = _long_digests(6)
+
+    async def fake_fold(model, context, fold, *, today):
+        return FoldResult(
+            context=merge_context(context, fold, "Lượt 1-3: tóm tắt."),
+            folded_turns=[d["turn"] for d in fold],
+            attempts=1,
+        )
+
+    _compaction_on(monkeypatch, fake_fold)
+    _stub_agent(monkeypatch, result=RunResult("Có 2 tin."))
+    _, events = _stream(client)
+
+    assert [name for name, _ in events] == ["compacting", "answer"]
+
+
+def test_stream_is_not_opened_for_a_missing_session(client, store, monkeypatch):
+    calls = _stub_agent(monkeypatch, result=RunResult("x"))
+    other = {"X-User-Id": "33333333-3333-4333-8333-333333333333"}
+    assert _stream(client, headers=other)[0] == 404
+    assert calls == []
