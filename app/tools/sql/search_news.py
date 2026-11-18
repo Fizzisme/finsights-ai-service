@@ -34,6 +34,7 @@ def _build_articles_query(args: NewsSearchInput) -> tuple[str, dict[str, Any]]:
     # Only constant SQL fragments are appended; every user value is a bound parameter.
     where = ["a.article_status = 'published'"]
     params: dict[str, Any] = {"limit": args.limit}
+    rank = ""
 
     if args.symbol:
         where.append(
@@ -41,6 +42,15 @@ def _build_articles_query(args: NewsSearchInput) -> tuple[str, dict[str, Any]]:
             "WHERE s.article_id = a.id AND s.symbol_at_publication = :symbol)"
         )
         params["symbol"] = args.symbol
+        # A ticker also matches market round-ups that only mention it in passing: articles
+        # naming the company in their title come first. Binary compare, because the matcher
+        # also tags lowercase look-alikes ("điều hòa phát" for Hòa Phát). The COLLATE must be
+        # on the title: MySQL ignores it on LOCATE's first argument.
+        rank = (
+            "EXISTS (SELECT 1 FROM news_article_securities t "
+            "WHERE t.article_id = a.id AND t.symbol_at_publication = :symbol "
+            "AND LOCATE(t.matched_alias, a.title COLLATE utf8mb4_bin) > 0) DESC, "
+        )
 
     if args.query:
         where.append("(a.title LIKE :kw OR a.summary LIKE :kw)")
@@ -65,7 +75,7 @@ def _build_articles_query(args: NewsSearchInput) -> tuple[str, dict[str, Any]]:
         "FROM news_articles a "
         "JOIN news_publishers p ON p.id = a.publisher_id "
         f"WHERE {' AND '.join(where)} "
-        "ORDER BY a.published_at DESC, a.id DESC "
+        f"ORDER BY {rank}a.published_at DESC, a.id DESC "
         "LIMIT :limit"
     )
     return sql, params
@@ -186,7 +196,8 @@ async def search_news_tool(
     publisher: str | None = None,
     limit: int = 8,
 ) -> dict[str, Any]:
-    """Search published Vietnamese financial news, newest first.
+    """Search published Vietnamese financial news, newest first (with a symbol: articles
+    naming the company in their title first).
 
     Filter by stock ticker (symbol), keyword (query), news source (publisher) and/or
     publication date range.

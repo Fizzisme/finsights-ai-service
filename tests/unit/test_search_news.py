@@ -26,6 +26,18 @@ def test_user_values_are_bound_never_inlined() -> None:
     assert params["date_to_excl"] == datetime(2026, 1, 31, 17, 0)
 
 
+def test_symbol_search_ranks_title_mentions_first() -> None:
+    sql, _ = mod._build_articles_query(NewsSearchInput(symbol="HPG"))
+    order = sql.split("ORDER BY", 1)[1]
+    # Case- and accent-exact, so "điều hòa phát" does not count as naming Hòa Phát.
+    assert order.lstrip().startswith("EXISTS")
+    assert "LOCATE(t.matched_alias, a.title COLLATE utf8mb4_bin)" in order
+    assert order.index("DESC") < order.index("a.published_at DESC")
+
+    plain, _ = mod._build_articles_query(NewsSearchInput(query="lãi suất"))
+    assert plain.split("ORDER BY", 1)[1].lstrip().startswith("a.published_at DESC")
+
+
 def test_like_wildcards_escaped() -> None:
     _, params = mod._build_articles_query(NewsSearchInput(query="50%_off"))
     assert params["kw"] == "%50\\%\\_off%"
