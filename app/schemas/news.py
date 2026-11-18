@@ -65,10 +65,13 @@ class NewsSearchInput(BaseModel):
         ),
     )
     limit: int = Field(
-        default=10,
+        default=8,
         ge=1,
         le=20,
-        description="Maximum number of articles to return (1-20).",
+        description=(
+            "Maximum number of articles to return (1-20). Keep the default unless the "
+            "user asks for more articles than it."
+        ),
     )
 
     @field_validator("symbol", mode="before")

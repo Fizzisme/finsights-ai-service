@@ -101,6 +101,40 @@ async def _fetch_matches(article_ids: list[int]) -> dict[int, list[NewsSecurityM
     return grouped
 
 
+# What the model reads of an article: everything it needs to cite it, nothing internal.
+SUMMARY_CHARS_FOR_MODEL = 300
+CONFIRMED_CONFIDENCE = 0.8
+
+
+def article_for_model(article: NewsArticle) -> dict[str, Any]:
+    """Compact view of an article for tool results (tool output is most of a turn's input).
+
+    Tickers matched by company name and not yet reviewed (or with low confidence) are
+    listed apart, so the model only relies on them when the text names the company.
+    """
+    summary = article.summary
+    if summary and len(summary) > SUMMARY_CHARS_FOR_MODEL:
+        summary = summary[:SUMMARY_CHARS_FOR_MODEL].rstrip() + "…"
+    confirmed: list[str] = []
+    unconfirmed: list[str] = []
+    for match in article.symbols:
+        sure = match.review_status != "pending" and (
+            match.confidence is None or match.confidence >= CONFIRMED_CONFIDENCE
+        )
+        (confirmed if sure else unconfirmed).append(match.symbol)
+    view: dict[str, Any] = {
+        "title": article.title,
+        "summary": summary,
+        "published_at": article.published_at.isoformat(),
+        "publisher": article.publisher,
+        "url": article.url,
+        "tickers": confirmed,
+    }
+    if unconfirmed:
+        view["tickers_unconfirmed"] = unconfirmed
+    return view
+
+
 async def latest_published_at(date_to: date | None = None) -> datetime | None:
     """Newest publication time in the database, so the model can tell stale data.
 
@@ -150,7 +184,7 @@ async def search_news_tool(
     date_from: Any = None,
     date_to: Any = None,
     publisher: str | None = None,
-    limit: int = 10,
+    limit: int = 8,
 ) -> dict[str, Any]:
     """Search published Vietnamese financial news, newest first.
 
@@ -174,4 +208,7 @@ async def search_news_tool(
         # Never leak DSN/host details to the model; give it something it can act on.
         logger.exception("search_news failed")
         return {"error": "News database is temporarily unavailable.", "articles": []}
-    return result.model_dump(mode="json")
+    return {
+        "articles": [article_for_model(a) for a in result.articles],
+        "data_as_of": result.model_dump(mode="json")["data_as_of"],
+    }

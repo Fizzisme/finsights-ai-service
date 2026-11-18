@@ -8,7 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.schemas.news import GetNewsArticleInput, GetNewsArticleResult, NewsArticle
 from app.storage.mysql.engine import fetch_all
-from app.tools.sql.search_news import _fetch_matches
+from app.tools.sql.search_news import _fetch_matches, article_for_model
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ async def get_news_article_tool(
 ) -> dict[str, Any]:
     """Get one published article (title, summary, publisher, link, matched tickers).
 
-    Give exactly one of article_uid or url, both taken from a search_news result.
+    Give the article's url from a search_news result (article_uid is also accepted).
     Full article text is not available; send the user to the link for details.
     """
     args = GetNewsArticleInput(article_uid=article_uid, url=url)
@@ -62,4 +62,4 @@ async def get_news_article_tool(
     except SQLAlchemyError, RuntimeError:
         logger.exception("get_news_article failed")
         return {"error": "News database is temporarily unavailable.", "article": None}
-    return result.model_dump(mode="json")
+    return {"article": article_for_model(result.article) if result.article else None}
