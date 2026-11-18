@@ -114,7 +114,7 @@ async def run_agent(
         passed=state["verification"]["passed"],
         unsupported=state["verification"]["unsupported"],
     )
-    input_tokens, output_tokens = token_usage(messages)
+    input_tokens, output_tokens, cache_read_tokens = token_usage(messages)
     return RunResult(
         answer=final_answer(messages),
         tool_calls=trace_tool_calls(messages),
@@ -122,4 +122,5 @@ async def run_agent(
         unsupported=verification.unsupported,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
     )

@@ -194,18 +194,28 @@ def test_token_usage_is_summed_and_saved(client, store, monkeypatch):
 
     from app.graph.nodes.agent import token_usage
 
-    usage = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+    cached = {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "input_token_details": {"cache_read": 80},
+    }
+    uncached = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
     messages = [
         HumanMessage("q"),
-        AIMessage("", usage_metadata=usage),
-        AIMessage("a", usage_metadata=usage),
+        AIMessage("", usage_metadata=cached),
+        AIMessage("a", usage_metadata=uncached),  # provider without cache details
     ]
-    assert token_usage(messages) == (200, 40)
-    assert token_usage([AIMessage("a")]) == (None, None)
+    assert token_usage(messages) == (200, 40, 80)
+    assert token_usage([AIMessage("a")]) == (None, None, None)
 
     _stub_agent(
-        monkeypatch, result=RunResult("Có 2 tin.", input_tokens=200, output_tokens=40)
+        monkeypatch,
+        result=RunResult(
+            "Có 2 tin.", input_tokens=200, output_tokens=40, cache_read_tokens=80
+        ),
     )
     assert _ask(client).status_code == 200
     assert store.saved[0]["prompt_tokens"] == 200
     assert store.saved[0]["completion_tokens"] == 40
+    assert store.saved[0]["ai_trace"]["cache_read_tokens"] == 80
