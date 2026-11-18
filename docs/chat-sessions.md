@@ -52,7 +52,7 @@ lưu UTC (server `time_zone = UTC`).
 | `model_name`, `error_code` | Dòng assistant; `error_code` = `timeout` \| `no_answer` \| `provider_error` |
 | `turn` | Số lượt trong phiên; unique `(session_id, turn, speaker)` chặn hai request ghi cùng một lượt |
 | `ai_trace` (JSON) | Dòng assistant: `digest`, `tool_calls`, `verified`, `unsupported`, `latency_ms` |
-| `prompt_tokens`, `completion_tokens` | Chưa ghi (để NULL) |
+| `prompt_tokens`, `completion_tokens` | Dòng assistant: tổng token mọi lần gọi model trong lượt |
 
 `ai_trace.digest` ví dụ:
 
@@ -121,9 +121,9 @@ với digest gốc (như `facts_verifier` của BOA); gấp lỗi thì quay về
 
 ## Còn mở
 
-1. **TLS:** kết nối MySQL của service chưa dùng TLS, trong khi coredb tạo account
-   với `REQUIRE SSL`. Cần làm trước khi chuyển `MYSQL_CHAT_DSN` sang account
-   `finsights_ai_app` của coredb (hiện dùng `finsights_ai_rw` tạo tay).
-2. **`finsights_ai_ro` ở Node 2** chưa được khai báo trong coredb nên bị xoá mỗi
-   lần reconcile Node 2. Làm sau TLS: khai báo user + secret `MYSQL_AI_RO_PASSWORD`.
-3. Thời gian giữ lịch sử (retention) và ghi `prompt_tokens`/`completion_tokens`.
+1. **Account chat:** chuyển `MYSQL_CHAT_DSN` sang `finsights_ai_app` (do coredb
+   quản lý, `REQUIRE SSL`) rồi bỏ `finsights_ai_rw` tạo tay. Service đã kết nối
+   MySQL bằng TLS có verify (`MYSQL_TLS=true`, CA trong `certs/`).
+2. **`finsights_ai_ro` ở Node 2:** khai báo trong coredb để không bị xoá khi
+   reconcile; cần secret `MYSQL_AI_RO_PASSWORD` trước khi merge.
+3. Thời gian giữ lịch sử (retention).

@@ -187,3 +187,25 @@ def test_create_and_delete_session(client, store):
 
     assert client.delete(f"/sessions/{SID}", headers=HEADERS).status_code == 204
     assert client.delete(f"/sessions/{SID}", headers=HEADERS).status_code == 404
+
+
+def test_token_usage_is_summed_and_saved(client, store, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.graph.nodes.agent import token_usage
+
+    usage = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
+    messages = [
+        HumanMessage("q"),
+        AIMessage("", usage_metadata=usage),
+        AIMessage("a", usage_metadata=usage),
+    ]
+    assert token_usage(messages) == (200, 40)
+    assert token_usage([AIMessage("a")]) == (None, None)
+
+    _stub_agent(
+        monkeypatch, result=RunResult("Có 2 tin.", input_tokens=200, output_tokens=40)
+    )
+    assert _ask(client).status_code == 200
+    assert store.saved[0]["prompt_tokens"] == 200
+    assert store.saved[0]["completion_tokens"] == 40

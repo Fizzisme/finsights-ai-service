@@ -99,6 +99,8 @@ async def save_turn(
     model_name: str | None,
     ai_trace: dict[str, Any],
     error_code: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
 ) -> int:
     """Store the user and assistant rows of the next turn in one transaction."""
     try:
@@ -119,8 +121,10 @@ async def save_turn(
             turn = int(row["next_turn"])
             insert = text(
                 "INSERT INTO chat_messages (message_uid, session_id, turn, speaker, "
-                "message_text, message_status, model_name, error_code, ai_trace) "
-                "VALUES (:uid, :sid, :turn, :speaker, :text, :status, :model, :error, :trace)"
+                "message_text, message_status, model_name, error_code, ai_trace, "
+                "prompt_tokens, completion_tokens) "
+                "VALUES (:uid, :sid, :turn, :speaker, :text, :status, :model, :error, "
+                ":trace, :prompt_tokens, :completion_tokens)"
             )
             await conn.execute(
                 insert,
@@ -134,6 +138,8 @@ async def save_turn(
                     "model": None,
                     "error": None,
                     "trace": None,
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
                 },
             )
             await conn.execute(
@@ -148,6 +154,8 @@ async def save_turn(
                     "model": model_name,
                     "error": error_code,
                     "trace": json.dumps(ai_trace, ensure_ascii=False),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
                 },
             )
             # The first question names the session; updated_at orders the session list.

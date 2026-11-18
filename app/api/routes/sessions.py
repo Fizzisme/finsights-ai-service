@@ -196,6 +196,8 @@ async def send_message(
         answer=result.answer,
         status=chat_store.COMPLETE,
         model_name=model_name,
+        prompt_tokens=result.input_tokens,
+        completion_tokens=result.output_tokens,
         ai_trace={
             "digest": build_digest(
                 request.question, result.answer, verified=result.verified

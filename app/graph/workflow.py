@@ -20,6 +20,7 @@ from app.graph.nodes.agent import (
     build_agent,
     build_user_message,
     final_answer,
+    token_usage,
     trace_tool_calls,
 )
 from app.graph.nodes.verifier import VerifyResult, feedback_message, verify_answer
@@ -113,9 +114,12 @@ async def run_agent(
         passed=state["verification"]["passed"],
         unsupported=state["verification"]["unsupported"],
     )
+    input_tokens, output_tokens = token_usage(messages)
     return RunResult(
         answer=final_answer(messages),
         tool_calls=trace_tool_calls(messages),
         verified=verification.passed,
         unsupported=verification.unsupported,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
