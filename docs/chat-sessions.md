@@ -84,6 +84,7 @@ của người khác, `session_uid` sai định dạng, phiên đã xoá đều 
 | `GET` | `/sessions/{session_uid}` | Phiên + các lượt (`turn`, `speaker`, `text`, `status`, `created_at`) |
 | `DELETE` | `/sessions/{session_uid}` | Xoá mềm → `204` |
 | `POST` | `/sessions/{session_uid}/messages?profile=&tier=` | Hỏi một lượt; body `{question}`; trả như `/runs` + `session_uid`, `turn` |
+| `POST` | `/sessions/{session_uid}/messages/stream?profile=&tier=` | Cùng lượt đó, trả tiến trình bằng Server-Sent Events (xem dưới) |
 
 Mã lỗi của `POST .../messages`: `401` thiếu/sai user, `404` không thấy phiên,
 `409` lượt bị ghi trùng, `502`/`504` agent lỗi (giống `/runs`), `503` DB lịch sử
@@ -91,6 +92,32 @@ không đọc được (agent không chạy). Nếu chỉ bước **lưu** lỗi
 trả với `turn = null`.
 
 `POST /runs` giữ nguyên (không lưu gì) cho eval và demo.
+
+### Streaming (SSE)
+
+Một lượt mất khoảng 10 giây. `.../messages/stream` chạy đúng lượt đó (cùng compaction,
+lưu, mã lỗi) nhưng báo tiến trình trong lúc chờ. Câu trả lời **không** được stream từng
+token: verifier chỉ kiểm được khi đã có cả câu, và một câu bị từ chối không được lọt tới
+người dùng, kể cả trong chốc lát.
+
+| Event | `data` | Khi nào |
+| --- | --- | --- |
+| `compacting` | `{}` | Lượt này gấp lịch sử cũ |
+| `tool_start` | `{name, args}` | Model gọi một tool |
+| `tool_end` | `{name, ok}` | Tool trả kết quả |
+| `verifying` | `{}` | Model viết xong, verifier đang kiểm |
+| `retrying` | `{}` | Verifier trả câu về cho model sửa (không kèm con số bị từ chối) |
+| `answer` | như `POST .../messages` | Câu đã qua verifier và đã lưu; event cuối |
+| `error` | `{status, detail}` | Lượt lỗi (`502`, `504`, `409`, `500`); event cuối |
+
+`401`, `404`, `503` (không đọc được lịch sử) vẫn trả HTTP status bình thường vì được
+kiểm trước khi mở stream. Client ngắt kết nối giữa chừng thì lượt bị huỷ, không lưu gì.
+
+```
+curl -N -X POST "http://localhost:8000/sessions/<uid>/messages/stream?profile=deepseek" \
+  -H "X-User-Id: <uuid>" -H "Content-Type: application/json" \
+  -d '{"question": "Tin mới về HPG?"}'
+```
 
 ## Luồng một lượt
 

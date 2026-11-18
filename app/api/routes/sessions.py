@@ -9,13 +9,15 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import asdict
+from collections.abc import AsyncIterable
+from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Annotated, Any
 
 from anthropic import APIError as AnthropicAPIError
 from anthropic import APITimeoutError as AnthropicTimeoutError
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
 from langchain_core.language_models.chat_models import BaseChatModel
 from openai import APIError as OpenAIAPIError
@@ -28,7 +30,7 @@ from app.core.settings import get_settings
 from app.graph import compaction
 from app.graph.history import MAX_UNFOLDED_TURNS, Context, Digest, build_digest, to_fold
 from app.graph.nodes.agent import AgentRunError, RunResult
-from app.graph.workflow import run_agent
+from app.graph.workflow import EventSink, run_agent
 from app.integrations.llm.config import ModelConfigError
 from app.integrations.llm.factory import get_chat_model
 from app.schemas.runs import ToolCallTrace
@@ -83,12 +85,17 @@ def compactor_model(profile: str) -> BaseChatModel | None:
 
 
 async def _compact(
-    compactor: BaseChatModel | None, context: Context | None, history: list[Digest]
+    compactor: BaseChatModel | None,
+    context: Context | None,
+    history: list[Digest],
+    on_event: EventSink | None = None,
 ) -> tuple[Context | None, dict[str, Any] | None]:
     """(new checkpoint or None, trace or None). Any failure means truncation instead."""
     fold = to_fold(context, history)
     if not fold or compactor is None:
         return None, None
+    if on_event is not None:
+        await on_event("compacting", {})
     try:
         async with asyncio.timeout(get_settings().llm_timeout_seconds):
             result = await compaction.fold_turns(
@@ -168,14 +175,17 @@ async def delete_session(user: User, session_uid: str) -> Response:
     return Response(status_code=204)
 
 
-@router.post("/{session_uid}/messages", response_model=TurnResponse)
-async def send_message(
-    user: User,
-    session_uid: str,
-    request: MessageRequest,
-    model: Annotated[BaseChatModel, Depends(configured_model)],
-    compactor: Annotated[BaseChatModel | None, Depends(compactor_model)],
-) -> TurnResponse:
+@dataclass
+class Conversation:
+    """A session and what its earlier turns left for the next one."""
+
+    session: dict[str, Any]
+    context: Context | None
+    history: list[Digest]
+
+
+async def conversation(user: User, session_uid: str) -> Conversation:
+    """Loaded before the turn starts, so a stream never opens for a missing session."""
     session = await _session(user, session_uid)
     try:
         context = await chat_store.latest_context(session["id"])
@@ -186,12 +196,75 @@ async def send_message(
     except SQLAlchemyError, RuntimeError:
         logger.exception("loading chat history failed")
         raise HTTPException(status_code=503, detail=UNAVAILABLE) from None
+    return Conversation(session, context, history)
 
+
+ChatModel = Annotated[BaseChatModel, Depends(configured_model)]
+Compactor = Annotated[BaseChatModel | None, Depends(compactor_model)]
+
+
+@router.post("/{session_uid}/messages", response_model=TurnResponse)
+async def send_message(
+    request: MessageRequest,
+    chat: Annotated[Conversation, Depends(conversation)],
+    model: ChatModel,
+    compactor: Compactor,
+) -> TurnResponse:
+    return await _turn(chat, request.question, model, compactor)
+
+
+@router.post("/{session_uid}/messages/stream", response_class=EventSourceResponse)
+async def stream_message(
+    request: MessageRequest,
+    chat: Annotated[Conversation, Depends(conversation)],
+    model: ChatModel,
+    compactor: Compactor,
+) -> AsyncIterable[ServerSentEvent]:
+    """The same turn as `send_message`, with its progress as Server-Sent Events.
+
+    Events: `compacting`, `tool_start`, `tool_end`, `verifying`, `retrying`, then either
+    `answer` (a TurnResponse, sent only after the verifier) or `error` ({status, detail}).
+    A client that disconnects cancels the turn; nothing is saved.
+    """
+    events: asyncio.Queue[ServerSentEvent | None] = asyncio.Queue()
+
+    async def emit(name: str, data: dict[str, Any]) -> None:
+        await events.put(ServerSentEvent(data=data, event=name))
+
+    async def run() -> None:
+        try:
+            response = await _turn(chat, request.question, model, compactor, emit)
+            await events.put(ServerSentEvent(data=response, event="answer"))
+        except HTTPException as exc:
+            await emit("error", {"status": exc.status_code, "detail": exc.detail})
+        except Exception:
+            logger.exception("streamed chat turn failed")
+            await emit("error", {"status": 500, "detail": "Internal server error."})
+        finally:
+            await events.put(None)
+
+    task = asyncio.create_task(run())
+    try:
+        while (event := await events.get()) is not None:
+            yield event
+    finally:
+        task.cancel()  # no-op once the turn has finished
+
+
+async def _turn(
+    chat: Conversation,
+    question: str,
+    model: BaseChatModel,
+    compactor: BaseChatModel | None,
+    on_event: EventSink | None = None,
+) -> TurnResponse:
+    """Run, save and return one turn; failures raise HTTPException."""
+    session, context, history = chat.session, chat.context, chat.history
     settings = get_settings()
     model_name = getattr(model, "model_name", None) or getattr(model, "model", None)
     started = time.monotonic()
     # Fold old turns before the run, so this turn already reads the smaller history.
-    checkpoint, fold_trace = await _compact(compactor, context, history)
+    checkpoint, fold_trace = await _compact(compactor, context, history, on_event)
     context = checkpoint or context
     extra: dict[str, Any] = {}
     if fold_trace:
@@ -203,12 +276,13 @@ async def send_message(
             result: RunResult = await run_agent(
                 model,
                 NEWS_TOOLS,
-                request.question,
+                question,
                 max_steps=settings.agent_max_steps,
                 max_retries=settings.verifier_max_retries,
                 max_tool_calls=settings.agent_max_tool_calls,
                 history=history,
                 context=context,
+                on_event=on_event,
             )
         if not result.answer.strip():
             raise AgentRunError("empty answer")
@@ -226,13 +300,13 @@ async def send_message(
         try:
             await _save(
                 session,
-                question=request.question,
+                question=question,
                 answer=detail,
                 status=chat_store.FAILED,
                 model_name=model_name,
                 error_code=code,
                 ai_trace={
-                    "digest": build_digest(request.question, detail, verified=False),
+                    "digest": build_digest(question, detail, verified=False),
                     "latency_ms": int((time.monotonic() - started) * 1000),
                     **extra,
                 },
@@ -243,16 +317,14 @@ async def send_message(
 
     turn = await _save(
         session,
-        question=request.question,
+        question=question,
         answer=result.answer,
         status=chat_store.COMPLETE,
         model_name=model_name,
         prompt_tokens=result.input_tokens,
         completion_tokens=result.output_tokens,
         ai_trace={
-            "digest": build_digest(
-                request.question, result.answer, verified=result.verified
-            ),
+            "digest": build_digest(question, result.answer, verified=result.verified),
             "tool_calls": [asdict(c) for c in result.tool_calls],
             "verified": result.verified,
             "unsupported": result.unsupported,
