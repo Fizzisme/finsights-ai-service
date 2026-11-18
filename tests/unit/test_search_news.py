@@ -80,3 +80,14 @@ async def test_no_rows_skips_second_query(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(mod, "fetch_all", fake_fetch_all)
     assert (await mod.search_news(NewsSearchInput())).articles == []
     assert n == 1
+
+
+def test_publisher_filter_bound_and_lowercased() -> None:
+    sql, params = mod._build_articles_query(NewsSearchInput(publisher=" VnExpress "))
+    assert "p.code = :publisher" in sql and "vnexpress" not in sql
+    assert params["publisher"] == "vnexpress"
+
+
+def test_publisher_rejects_injection_chars() -> None:
+    with pytest.raises(ValueError):
+        NewsSearchInput(publisher="cafef' OR 1=1")

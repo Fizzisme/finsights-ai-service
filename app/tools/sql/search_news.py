@@ -40,6 +40,10 @@ def _build_articles_query(args: NewsSearchInput) -> tuple[str, dict[str, Any]]:
         where.append("(a.title LIKE :kw OR a.summary LIKE :kw)")
         params["kw"] = f"%{_escape_like(args.query)}%"
 
+    if args.publisher:
+        where.append("p.code = :publisher")
+        params["publisher"] = args.publisher
+
     if args.date_from:
         where.append("a.published_at >= :date_from")
         params["date_from"] = args.date_from
@@ -118,17 +122,24 @@ async def search_news_tool(
     query: str | None = None,
     date_from: Any = None,
     date_to: Any = None,
+    publisher: str | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
     """Search published Vietnamese financial news, newest first.
 
-    Filter by stock ticker (symbol), keyword (query) and/or publication date range.
+    Filter by stock ticker (symbol), keyword (query), news source (publisher) and/or
+    publication date range.
     Returns article titles, summaries, publisher, link (url) and the tickers each
     article was matched to. Full article text is not available; cite the url.
     """
     # args_schema has already validated/normalised the arguments.
     args = NewsSearchInput(
-        symbol=symbol, query=query, date_from=date_from, date_to=date_to, limit=limit
+        symbol=symbol,
+        query=query,
+        date_from=date_from,
+        date_to=date_to,
+        publisher=publisher,
+        limit=limit,
     )
     try:
         result = await search_news(args)

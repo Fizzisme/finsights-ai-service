@@ -12,7 +12,14 @@ def test_tool_schema_exposes_name_and_descriptions() -> None:
     tool = mod.search_news_tool
     assert tool.name == "search_news"
     props = tool.args
-    assert set(props) == {"symbol", "query", "date_from", "date_to", "limit"}
+    assert set(props) == {
+        "symbol",
+        "query",
+        "date_from",
+        "date_to",
+        "publisher",
+        "limit",
+    }
     assert all("description" in p for p in props.values())
     assert tool.description
 
