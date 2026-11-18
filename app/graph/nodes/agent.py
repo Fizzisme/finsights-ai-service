@@ -44,20 +44,25 @@ class RunResult:
     # Summed over every model call of the run; None when the provider reports no usage.
     input_tokens: int | None = None
     output_tokens: int | None = None
+    # Part of input_tokens served from the provider's prompt cache (billed far cheaper).
+    cache_read_tokens: int | None = None
 
 
-def token_usage(messages: Sequence[BaseMessage]) -> tuple[int | None, int | None]:
-    """(input, output) tokens of all model calls in `messages`."""
+def token_usage(
+    messages: Sequence[BaseMessage],
+) -> tuple[int | None, int | None, int | None]:
+    """(input, output, cache-read input) tokens of all model calls in `messages`."""
     usages = [
         m.usage_metadata
         for m in messages
         if isinstance(m, AIMessage) and m.usage_metadata
     ]
     if not usages:
-        return None, None
+        return None, None, None
     return (
         sum(u.get("input_tokens", 0) for u in usages),
         sum(u.get("output_tokens", 0) for u in usages),
+        sum(u.get("input_token_details", {}).get("cache_read", 0) for u in usages),
     )
 
 

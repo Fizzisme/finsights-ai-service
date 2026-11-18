@@ -206,6 +206,8 @@ async def send_message(
             "verified": result.verified,
             "unsupported": result.unsupported,
             "latency_ms": int((time.monotonic() - started) * 1000),
+            # No column for it in finsights_ai: prompt_tokens includes these cache hits.
+            "cache_read_tokens": result.cache_read_tokens,
         },
     )
     return TurnResponse(
