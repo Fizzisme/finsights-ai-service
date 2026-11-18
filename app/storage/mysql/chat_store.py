@@ -2,7 +2,9 @@
 
 A turn is two `chat_messages` rows (speaker `user` and `assistant`) sharing a `turn` number;
 the assistant row's `ai_trace` holds the digest later turns read (app/graph/history.py).
-Every query is scoped by `user_uid`, so one user can never reach another's session.
+Every user-facing query is scoped by `user_uid`, so one user can never reach another's
+session. Retention (`purge_*`) is the only cross-user operation; it runs from a scheduled
+script, never from a request.
 """
 
 import json
@@ -187,3 +189,78 @@ async def delete_session(user_uid: str, session_uid: str) -> bool:
             },
         )
         return result.rowcount > 0
+
+
+# --- Retention -------------------------------------------------------------------------
+# Sessions the user deleted are kept 30 days (to undo a mistake), then removed; sessions
+# with no new turn for 180 days are removed. Deleting needs the DELETE privilege, which
+# finsights_ai_app has.
+DELETED_RETENTION_DAYS = 30
+INACTIVE_RETENTION_DAYS = 180
+
+# Constant SQL: the day counts are bound parameters. Server time is UTC, like the columns.
+_EXPIRED = (
+    "((session_status = :deleted "
+    "AND COALESCE(closed_at, updated_at) < UTC_TIMESTAMP(3) - INTERVAL :deleted_days DAY) "
+    "OR updated_at < UTC_TIMESTAMP(3) - INTERVAL :inactive_days DAY)"
+)
+_RETENTION = {
+    "deleted": DELETED,
+    "deleted_days": DELETED_RETENTION_DAYS,
+    "inactive_days": INACTIVE_RETENTION_DAYS,
+}
+
+
+async def count_expired() -> dict[str, int]:
+    """What a purge would remove now (dry run)."""
+    rows = await _fetch(
+        "SELECT COUNT(*) AS sessions, "
+        "COALESCE(SUM(session_status = :deleted), 0) AS deleted_sessions, "
+        "(SELECT COUNT(*) FROM chat_messages WHERE session_id IN "
+        f"(SELECT id FROM chat_sessions WHERE {_EXPIRED})) AS messages "
+        f"FROM chat_sessions WHERE {_EXPIRED}",
+        _RETENTION,
+    )
+    return {key: int(value) for key, value in rows[0].items()}
+
+
+async def expired_session_ids(limit: int) -> list[int]:
+    rows = await _fetch(
+        f"SELECT id FROM chat_sessions WHERE {_EXPIRED} ORDER BY id LIMIT :limit",
+        {**_RETENTION, "limit": limit},
+    )
+    return [int(row["id"]) for row in rows]
+
+
+async def purge_sessions(session_ids: list[int]) -> tuple[int, int]:
+    """Hard-delete the given sessions and their messages, if still expired.
+
+    The candidates are locked and re-checked inside the transaction, so a session that got
+    a new turn after it was listed is kept. Returns (messages deleted, sessions deleted).
+    """
+    if not session_ids:
+        return 0, 0
+    names = [f"id{i}" for i in range(len(session_ids))]
+    ids = dict(zip(names, session_ids, strict=True))
+    in_list = ", ".join(f":{n}" for n in names)
+    async with get_chat_engine().begin() as conn:
+        rows = await conn.execute(
+            text(
+                f"SELECT id FROM chat_sessions WHERE id IN ({in_list}) AND {_EXPIRED} "
+                "FOR UPDATE"
+            ),
+            {**ids, **_RETENTION},
+        )
+        confirmed = [int(row.id) for row in rows]
+        if not confirmed:
+            return 0, 0
+        names = [f"c{i}" for i in range(len(confirmed))]
+        params = dict(zip(names, confirmed, strict=True))
+        in_list = ", ".join(f":{n}" for n in names)
+        messages = await conn.execute(
+            text(f"DELETE FROM chat_messages WHERE session_id IN ({in_list})"), params
+        )
+        sessions = await conn.execute(
+            text(f"DELETE FROM chat_sessions WHERE id IN ({in_list})"), params
+        )
+        return messages.rowcount, sessions.rowcount

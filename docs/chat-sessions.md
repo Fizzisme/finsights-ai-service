@@ -119,11 +119,31 @@ khỏi cửa sổ được một model rẻ gấp thành rolling summary, lưu l
 (cần thêm cột qua coredb). Code kiểm mọi fact model giữ lại phải khớp y nguyên
 với digest gốc (như `facts_verifier` của BOA); gấp lỗi thì quay về cắt bớt.
 
-## Còn mở
+## Account và kết nối
 
-1. **Account chat:** chuyển `MYSQL_CHAT_DSN` sang `finsights_ai_app` (do coredb
-   quản lý, `REQUIRE SSL`) rồi bỏ `finsights_ai_rw` tạo tay. Service đã kết nối
-   MySQL bằng TLS có verify (`MYSQL_TLS=true`, CA trong `certs/`).
-2. **`finsights_ai_ro` ở Node 2:** khai báo trong coredb để không bị xoá khi
-   reconcile; cần secret `MYSQL_AI_RO_PASSWORD` trước khi merge.
-3. Thời gian giữ lịch sử (retention).
+| Việc | Account | Node | Quản lý bởi |
+| --- | --- | --- | --- |
+| Đọc tin (`MYSQL_SOURCE_READONLY_DSN`) | `finsights_ai_ro`, `SELECT` | 2 | coredb, secret `MYSQL_AI_RO_PASSWORD` |
+| Lịch sử chat (`MYSQL_CHAT_DSN`) | `finsights_ai_app`, `SELECT/INSERT/UPDATE/DELETE` | 1 | coredb, secret `MYSQL_AI_APP_PASSWORD` |
+
+Cả hai account có `REQUIRE SSL`; service kết nối bằng TLS có verify
+(`MYSQL_TLS=true`, CA trong `certs/`). Đổi mật khẩu: cập nhật secret trong
+coredb, chạy workflow reconcile, rồi sửa `.env` và khởi động lại server.
+
+## Retention
+
+| Phiên | Xoá hẳn sau |
+| --- | --- |
+| Người dùng đã xoá (`deleted`) | 30 ngày kể từ lúc xoá |
+| Không có lượt mới | 180 ngày kể từ lượt cuối |
+
+```
+uv run --env-file .env python -m scripts.purge_chat_history            # dry run
+uv run --env-file .env python -m scripts.purge_chat_history --apply    # xoá
+```
+
+Chạy mỗi ngày một lần (cron; sau này Dagster). Xoá theo lô 100 phiên, mỗi lô một
+transaction; phiên được khoá và kiểm lại điều kiện trước khi xoá, nên phiên vừa
+có lượt mới được giữ. Đã kiểm trên Node 1 (2026-11-18): phiên không hoạt động
+200 ngày và phiên xoá 40 ngày bị xoá cùng message, phiên xoá 10 ngày được giữ;
+chạy lần hai không còn gì để xoá.
