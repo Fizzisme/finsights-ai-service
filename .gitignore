@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 *.pem
+# Public MySQL CA trust anchors (copied from finsights-coredb); never private keys.
+!certs/mysql-node-1-ca.pem
+!certs/mysql-node-2-ca.pem
 *.key
 
 # Python and tooling
