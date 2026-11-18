@@ -150,7 +150,7 @@ EDGE_CASES: list[Case] = [
     Case(
         "Trong tháng 10/2026, số bài về VCB chiếm bao nhiêu phần trăm tổng số bài?",
         {"count_news", "calculate"},
-        note="share = 333 / 7497 -> ~4.44% (check manually)",
+        note="share = 333 / 7503 (Vietnam days) -> ~4.44% (check manually)",
     ),
     Case(
         "Top 3 mã được nhắc đến nhiều nhất trong tháng 9/2026, kèm số bài",

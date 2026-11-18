@@ -13,7 +13,7 @@ from app.schemas.news import (
     NewsCountGroup,
 )
 from app.storage.mysql.engine import fetch_all
-from app.tools.sql.search_news import _escape_like
+from app.tools.sql.search_news import _escape_like, vn_day_start_utc
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 _GROUP_EXPR = {
     "symbol": "s.symbol_at_publication",
     "publisher": "p.name",
-    "day": "DATE(a.published_at)",
+    # published_at is UTC; group by the Vietnam calendar day (UTC+7, no DST).
+    "day": "DATE(a.published_at + INTERVAL 7 HOUR)",
 }
 
 
@@ -53,11 +54,11 @@ def _build_where(args: CountNewsInput) -> tuple[str, dict[str, Any]]:
 
     if args.date_from:
         where.append("a.published_at >= :date_from")
-        params["date_from"] = args.date_from
+        params["date_from"] = vn_day_start_utc(args.date_from)
 
     if args.date_to:
         where.append("a.published_at < :date_to_excl")
-        params["date_to_excl"] = args.date_to + timedelta(days=1)
+        params["date_to_excl"] = vn_day_start_utc(args.date_to + timedelta(days=1))
 
     return " AND ".join(where), params
 

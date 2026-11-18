@@ -2,13 +2,14 @@
 
 import logging
 from collections import defaultdict
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from langchain_core.tools import tool
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.schemas.news import (
+    VN_UTC_OFFSET,
     NewsArticle,
     NewsSearchInput,
     NewsSearchResult,
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 def _escape_like(value: str) -> str:
     """Escape LIKE wildcards so user text is matched literally."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def vn_day_start_utc(d: date) -> datetime:
+    """Start of a Vietnam calendar day, as the naive UTC value MySQL stores."""
+    return datetime.combine(d, time()) - VN_UTC_OFFSET
 
 
 def _build_articles_query(args: NewsSearchInput) -> tuple[str, dict[str, Any]]:
@@ -46,12 +52,12 @@ def _build_articles_query(args: NewsSearchInput) -> tuple[str, dict[str, Any]]:
 
     if args.date_from:
         where.append("a.published_at >= :date_from")
-        params["date_from"] = args.date_from
+        params["date_from"] = vn_day_start_utc(args.date_from)
 
     if args.date_to:
         # date_to is inclusive: compare against the start of the next day.
         where.append("a.published_at < :date_to_excl")
-        params["date_to_excl"] = args.date_to + timedelta(days=1)
+        params["date_to_excl"] = vn_day_start_utc(args.date_to + timedelta(days=1))
 
     sql = (
         "SELECT a.id AS article_id, a.article_uid, a.title, a.summary, a.published_at, "

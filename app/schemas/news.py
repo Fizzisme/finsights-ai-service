@@ -1,7 +1,12 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# MySQL stores published_at as naive UTC. Users mean Vietnam calendar days
+# (UTC+7, no daylight saving), so filters and output are converted to it.
+VN_UTC_OFFSET = timedelta(hours=7)
+VN_TZ = timezone(VN_UTC_OFFSET, "Asia/Ho_Chi_Minh")
 
 
 class NewsSearchInput(BaseModel):
@@ -85,12 +90,19 @@ class NewsArticle(BaseModel):
     article_uid: str
     title: str
     summary: str | None = None
-    # Naive datetime straight from MySQL; timezone not yet confirmed.
+    # Exposed in Vietnam time (+07:00) so the date matches what the user sees.
     published_at: datetime
     publisher: str
     url: str
     content_rights: str
     symbols: list[NewsSecurityMatch] = Field(default_factory=list)
+
+    @field_validator("published_at")
+    @classmethod
+    def utc_to_vn(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=UTC)
+        return v.astimezone(VN_TZ)
 
 
 class NewsSearchResult(BaseModel):
