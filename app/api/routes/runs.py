@@ -18,7 +18,10 @@ from app.graph.nodes.agent import AgentRunError
 from app.graph.workflow import run_agent
 from app.schemas.runs import RunRequest, RunResponse, ToolCallTrace
 from app.tools.calculator.calculate import calculate_tool
-from app.tools.sql.news_tool import search_news_tool
+from app.tools.sql.count_news import count_news_tool
+from app.tools.sql.get_news_article import get_news_article_tool
+from app.tools.sql.resolve_security import resolve_security_tool
+from app.tools.sql.search_news import search_news_tool
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -39,7 +42,13 @@ async def create_run(
         async with asyncio.timeout(settings.agent_timeout_seconds):
             result = await run_agent(
                 model,
-                [search_news_tool, calculate_tool],
+                [
+                    search_news_tool,
+                    count_news_tool,
+                    get_news_article_tool,
+                    resolve_security_tool,
+                    calculate_tool,
+                ],
                 request.question,
                 max_steps=settings.agent_max_steps,
                 max_retries=settings.verifier_max_retries,

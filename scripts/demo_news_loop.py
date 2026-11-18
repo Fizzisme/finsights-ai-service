@@ -11,7 +11,7 @@ from app.core.settings import get_settings
 from app.graph.workflow import run_agent
 from app.integrations.llm.factory import get_chat_model
 from app.tools.calculator.calculate import calculate_tool
-from app.tools.sql.news_tool import search_news_tool
+from app.tools.sql.search_news import search_news_tool
 
 
 async def main() -> None:

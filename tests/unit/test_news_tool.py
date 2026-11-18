@@ -5,14 +5,21 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.schemas.news import NewsArticle, NewsSearchInput, NewsSearchResult
-from app.tools.sql import news_tool as mod
+from app.tools.sql import search_news as mod
 
 
 def test_tool_schema_exposes_name_and_descriptions() -> None:
     tool = mod.search_news_tool
     assert tool.name == "search_news"
     props = tool.args
-    assert set(props) == {"symbol", "query", "date_from", "date_to", "limit"}
+    assert set(props) == {
+        "symbol",
+        "query",
+        "date_from",
+        "date_to",
+        "publisher",
+        "limit",
+    }
     assert all("description" in p for p in props.values())
     assert tool.description
 

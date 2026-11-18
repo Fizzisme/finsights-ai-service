@@ -1,8 +1,12 @@
-"""Fixed-parameter SQL behind the search_news tool. Reads finsights_news only."""
+"""search_news: fixed-parameter SQL plus its LangChain tool. Reads finsights_news only."""
 
+import logging
 from collections import defaultdict
 from datetime import timedelta
 from typing import Any
+
+from langchain_core.tools import tool
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.schemas.news import (
     NewsArticle,
@@ -11,6 +15,8 @@ from app.schemas.news import (
     NewsSecurityMatch,
 )
 from app.storage.mysql.engine import fetch_all
+
+logger = logging.getLogger(__name__)
 
 
 def _escape_like(value: str) -> str:
@@ -33,6 +39,10 @@ def _build_articles_query(args: NewsSearchInput) -> tuple[str, dict[str, Any]]:
     if args.query:
         where.append("(a.title LIKE :kw OR a.summary LIKE :kw)")
         params["kw"] = f"%{_escape_like(args.query)}%"
+
+    if args.publisher:
+        where.append("p.code = :publisher")
+        params["publisher"] = args.publisher
 
     if args.date_from:
         where.append("a.published_at >= :date_from")
@@ -104,3 +114,37 @@ async def search_news(args: NewsSearchInput) -> NewsSearchResult:
         for row in rows
     ]
     return NewsSearchResult(articles=articles)
+
+
+@tool("search_news", args_schema=NewsSearchInput)
+async def search_news_tool(
+    symbol: str | None = None,
+    query: str | None = None,
+    date_from: Any = None,
+    date_to: Any = None,
+    publisher: str | None = None,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Search published Vietnamese financial news, newest first.
+
+    Filter by stock ticker (symbol), keyword (query), news source (publisher) and/or
+    publication date range.
+    Returns article titles, summaries, publisher, link (url) and the tickers each
+    article was matched to. Full article text is not available; cite the url.
+    """
+    # args_schema has already validated/normalised the arguments.
+    args = NewsSearchInput(
+        symbol=symbol,
+        query=query,
+        date_from=date_from,
+        date_to=date_to,
+        publisher=publisher,
+        limit=limit,
+    )
+    try:
+        result = await search_news(args)
+    except SQLAlchemyError, RuntimeError:
+        # Never leak DSN/host details to the model; give it something it can act on.
+        logger.exception("search_news failed")
+        return {"error": "News database is temporarily unavailable.", "articles": []}
+    return result.model_dump(mode="json")
