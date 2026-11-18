@@ -11,7 +11,7 @@ from app.tools.sql import search_news as mod
 def test_no_filters_only_published_and_limit() -> None:
     sql, params = mod._build_articles_query(NewsSearchInput())
     assert "a.article_status = 'published'" in sql
-    assert params == {"limit": 10}
+    assert params == {"limit": 8}
 
 
 def test_user_values_are_bound_never_inlined() -> None:
@@ -110,3 +110,30 @@ async def test_data_as_of_hidden_for_a_complete_period(monkeypatch) -> None:
     assert await mod.latest_published_at(date(2026, 11, 17)) is not None  # same day
     assert await mod.latest_published_at(date(2026, 11, 30)) is not None
     assert await mod.latest_published_at(None) is not None
+
+
+def test_article_for_model_is_compact() -> None:
+    from app.schemas.news import NewsArticle, NewsSecurityMatch
+
+    article = NewsArticle(
+        article_uid="uid-7",
+        title="VCB và TCB",
+        summary="x" * 500,
+        published_at=datetime(2026, 5, 1, 1, 0),
+        publisher="CafeF",
+        url="https://example.com/7",
+        content_rights="link_only",
+        symbols=[
+            NewsSecurityMatch(symbol="VCB", match_method="ticker_boundary", review_status="auto", confidence=0.98),
+            NewsSecurityMatch(symbol="TCB", match_method="company_phrase", review_status="pending", confidence=0.97),
+            NewsSecurityMatch(symbol="MBB", match_method="ticker_boundary", review_status="auto", confidence=0.5),
+        ],
+    )
+    view = mod.article_for_model(article)
+    assert set(view) == {"title", "summary", "published_at", "publisher", "url", "tickers", "tickers_unconfirmed"}
+    assert view["tickers"] == ["VCB"] and view["tickers_unconfirmed"] == ["TCB", "MBB"]
+    assert len(view["summary"]) == mod.SUMMARY_CHARS_FOR_MODEL + 1  # plus the ellipsis
+    assert view["published_at"] == "2026-05-01T08:00:00+07:00"
+
+    plain = mod.article_for_model(article.model_copy(update={"symbols": [], "summary": None}))
+    assert "tickers_unconfirmed" not in plain and plain["summary"] is None

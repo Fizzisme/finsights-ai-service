@@ -8,7 +8,7 @@ from app.schemas.news import NewsArticle, NewsSearchInput, NewsSearchResult
 
 def test_empty_input_is_valid_with_default_limit() -> None:
     args = NewsSearchInput()
-    assert args.limit == 10
+    assert args.limit == 8
     assert args.symbol is None
 
 
