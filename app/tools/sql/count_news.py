@@ -2,7 +2,7 @@
 
 import logging
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.tools import tool
 from sqlalchemy.exc import SQLAlchemyError
@@ -115,7 +115,7 @@ async def count_news_tool(
     date_from: Any = None,
     date_to: Any = None,
     publisher: str | None = None,
-    group_by: str = "none",
+    group_by: Literal["none", "symbol", "publisher", "day"] = "none",
     limit: int = 10,
 ) -> dict[str, Any]:
     """Count published Vietnamese financial news articles, optionally broken down.
