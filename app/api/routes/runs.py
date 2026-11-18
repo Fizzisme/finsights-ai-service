@@ -18,7 +18,7 @@ from app.graph.nodes.agent import AgentRunError
 from app.graph.workflow import run_agent
 from app.schemas.runs import RunRequest, RunResponse, ToolCallTrace
 from app.tools.calculator.calculate import calculate_tool
-from app.tools.sql.news_tool import search_news_tool
+from app.tools.sql.search_news import search_news_tool
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

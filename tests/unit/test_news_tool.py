@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.schemas.news import NewsArticle, NewsSearchInput, NewsSearchResult
-from app.tools.sql import news_tool as mod
+from app.tools.sql import search_news as mod
 
 
 def test_tool_schema_exposes_name_and_descriptions() -> None:
