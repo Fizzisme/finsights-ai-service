@@ -6,6 +6,7 @@ START -> agent -> verifier --ok / retries exhausted--> END
 """
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
@@ -33,6 +34,36 @@ class RunState(MessagesState):
 
 # Receives progress events of a run: (name, data); see `progress_events`.
 EventSink = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+@dataclass
+class TokenTally:
+    """Token usage of a run so far, filled while it runs: a run that times out or fails
+    still reports what it spent (the token quota charges it)."""
+
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    _seen: set[str] = field(default_factory=set, repr=False)
+
+    def add(self, updates: Mapping[str, Any]) -> None:
+        """Count the model replies in one update of the agent loop."""
+        for update in updates.values():
+            if not isinstance(update, dict):
+                continue
+            for message in update.get("messages", []):
+                if not isinstance(message, AIMessage) or not message.usage_metadata:
+                    continue
+                if message.id:
+                    if message.id in self._seen:
+                        continue  # a middleware may hand the same reply back
+                    self._seen.add(message.id)
+                usage = message.usage_metadata
+                self.input += usage.get("input_tokens", 0)
+                self.output += usage.get("output_tokens", 0)
+                self.cache_read += usage.get("input_token_details", {}).get(
+                    "cache_read", 0
+                )
 
 
 def progress_events(
@@ -128,12 +159,14 @@ async def run_agent(
     history: Sequence[dict[str, Any]] = (),
     context: dict[str, Any] | None = None,
     on_event: EventSink | None = None,
+    tally: TokenTally | None = None,
 ) -> RunResult:
     """One turn of a chat session.
 
     `history` holds digests of earlier turns; `context` is the rolling summary of the turns
     folded so far (app/graph/history.py). Turns that still do not fit are truncated.
-    `on_event` receives the run's progress (see `progress_events`).
+    `on_event` receives the run's progress (see `progress_events`); `tally` the tokens it
+    spends, as they are spent.
     """
     today = today or date.today()
     turns = fit(context, history)
@@ -163,9 +196,14 @@ async def run_agent(
         if part["type"] == "values":
             if not part["ns"]:
                 state = part["data"]  # the workflow's own state, not the agent's
-        elif part["type"] == "updates" and on_event is not None:
-            for name, data in progress_events(part["ns"], part["data"]):
-                await on_event(name, data)
+        elif part["type"] == "updates":
+            # Only the agent loop's own updates: the workflow's `agent` update repeats
+            # every message of the loop.
+            if tally is not None and part["ns"]:
+                tally.add(part["data"])
+            if on_event is not None:
+                for name, data in progress_events(part["ns"], part["data"]):
+                    await on_event(name, data)
     messages: Sequence[BaseMessage] = state["messages"]
     verification = VerifyResult(
         passed=state["verification"]["passed"],
