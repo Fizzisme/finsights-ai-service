@@ -85,9 +85,10 @@ của người khác, `session_uid` sai định dạng, phiên đã xoá đều 
 | `DELETE` | `/sessions/{session_uid}` | Xoá mềm → `204` |
 | `POST` | `/sessions/{session_uid}/messages?profile=&tier=` | Hỏi một lượt; body `{question}`; trả như `/runs` + `session_uid`, `turn` |
 | `POST` | `/sessions/{session_uid}/messages/stream?profile=&tier=` | Cùng lượt đó, trả tiến trình bằng Server-Sent Events (xem dưới) |
+| `GET` | `/usage` | Quota token của user: đã dùng, hạn mức, lúc reset (xem [Quota](#quota-token)) |
 
 Mã lỗi của `POST .../messages`: `401` thiếu/sai user, `404` không thấy phiên,
-`409` lượt bị ghi trùng, `502`/`504` agent lỗi (giống `/runs`), `503` DB lịch sử
+`429` hết quota token, `409` lượt bị ghi trùng, `502`/`504` agent lỗi (giống `/runs`), `503` DB lịch sử
 không đọc được (agent không chạy). Nếu chỉ bước **lưu** lỗi, câu trả lời vẫn được
 trả với `turn = null`.
 
@@ -165,6 +166,60 @@ Theo cơ chế của BOA, với hai điều chỉnh:
 Kiểm chứng trên Node 1 (2026-11-18), phiên 10 lượt: gấp ở lượt 7 (lượt 1–3), 8,
 9, 10, mỗi lần qua verifier ngay lần đầu; tóm tắt giữ ở 600–1.000 ký tự; lượt 10
 hỏi lại con số của lượt 1 (đã chỉ còn trong tóm tắt) và trả đúng 229.
+
+## Quota token
+
+Mỗi user có hai cửa sổ quota, theo kiểu Claude:
+
+| Cửa sổ | Mặc định | Setting |
+| --- | --- | --- |
+| 5 giờ | 150.000 token (khoảng 25 lượt) | `QUOTA_FIVE_HOUR_TOKENS` |
+| 7 ngày | 1.500.000 token (khoảng 250 lượt) | `QUOTA_WEEKLY_TOKENS` |
+
+- **Cửa sổ neo, không trượt.** Cửa sổ mở ở lượt đầu tiên sau khi cửa sổ trước đã hết,
+  và hết 5 giờ (hay 7 ngày) thì về 0. Đặt setting bằng `0` để tắt loại giới hạn đó.
+- **Token tính quota** = input chưa cache + output + 10% token đọc từ prompt cache
+  (cache rẻ khoảng 10 lần). Đo trên Node 1 (2026-11-19): câu hỏi đếm khoảng 1.400, liệt
+  kê bài 4.700–11.800 (kết quả tool là input mới, không có trong cache), trung bình
+  khoảng 6.000.
+- **Kiểm tra trước, trừ sau.** Cửa sổ nào đã dùng ≥ hạn mức thì lượt mới bị từ chối với
+  `429`, header `Retry-After` (giây), body
+  `{"detail": {"message", "limit": "five_hour" | "weekly", "resets_at"}}`. Token chỉ
+  biết khi lượt chạy xong, nên lượt cuối (hoặc vài lượt gửi song song) có thể vượt hạn
+  mức một chút.
+- **Lượt nào cũng bị tính**, kể cả lượt lỗi, timeout hay client ngắt stream giữa chừng:
+  token đếm dần trong lúc chạy (`TokenTally`), nên lượt bị huỷ vẫn biết đã tốn bao nhiêu.
+  Lượt lỗi giờ cũng lưu `prompt_tokens`/`completion_tokens`.
+- Không đọc được quota (DB lỗi) → `503`, agent không chạy. Ghi quota lỗi chỉ log, câu trả
+  lời vẫn được trả.
+- **Chưa tính** token của compaction (model rẻ, khoảng 1–2k mỗi lần gấp).
+- `/runs` không có `X-User-Id` nên không bị giới hạn. Chỉ dùng cho eval: gateway **không
+  được** mở endpoint này ra ngoài.
+
+Trạng thái lưu ở bảng `chat_usage` (coredb), một dòng mỗi user: `window_started_at`,
+`window_tokens`, `week_started_at`, `week_tokens`. Không tính lại được từ
+`chat_messages`, vì điểm bắt đầu của cửa sổ hiện tại phụ thuộc cả chuỗi cửa sổ trước.
+Trừ quota là một câu `INSERT … ON DUPLICATE KEY UPDATE`, nên hai lượt đồng thời không làm
+mất số liệu của nhau.
+
+`GET /usage`:
+
+```json
+{
+  "five_hour": {"used": 41250, "limit": 150000, "resets_at": "2026-11-19T17:02:11Z"},
+  "weekly": {"used": 412300, "limit": 1500000, "resets_at": "2026-11-23T08:40:05Z"}
+}
+```
+
+`resets_at = null` khi cửa sổ chưa mở; `limit = null` khi giới hạn đó tắt.
+
+Kiểm chứng trên Node 1 (2026-11-19), với một server tạm đặt `QUOTA_FIVE_HOUR_TOKENS=1000`:
+- Sau 2 lượt, `chat_usage` có đúng 1.401 + 11.811 token (khớp công thức với
+  `prompt_tokens`, `completion_tokens` và `cache_read_tokens`), hai cửa sổ neo ở lượt 1.
+- Lượt tiếp theo nhận `429`, `Retry-After` khoảng 4 giờ 56 phút. Endpoint stream cũng
+  `429`; user khác không bị ảnh hưởng.
+- Lùi `window_started_at` 6 giờ: cửa sổ 5 giờ về 0, lượt mới mở cửa sổ mới neo ở lượt đó
+  (4.714 token), cửa sổ tuần vẫn giữ mốc cũ và cộng dồn (17.926). Lượt sau lại `429`.
 
 ## Account và kết nối
 

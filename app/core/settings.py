@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     agent_timeout_seconds: float = Field(default=60, gt=0, le=300)
     verifier_max_retries: int = Field(default=1, ge=0, le=3)
 
+    # Per-user token quota of chat sessions (see app/storage/mysql/usage_store.py); 0 = off.
+    # Measured 1.4k (a count) to 12k (lists of articles) cache-weighted tokens per turn,
+    # about 6k on average: ~25 turns per 5 hours, ~250 per week.
+    quota_five_hour_tokens: int = Field(default=150_000, ge=0)
+    quota_weekly_tokens: int = Field(default=1_500_000, ge=0)
+
     mysql_source_readonly_dsn: SecretStr = SecretStr("")
     # Node 1 finsights_ai: chat sessions and messages (read/write account).
     mysql_chat_dsn: SecretStr = SecretStr("")

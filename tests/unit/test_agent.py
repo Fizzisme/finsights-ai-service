@@ -249,3 +249,52 @@ async def test_progress_events_follow_the_run() -> None:
     ]
     # The rejected figure never reaches the client.
     assert "99" not in str(events)
+
+
+@pytest.mark.anyio
+async def test_tally_counts_every_model_call_as_it_happens() -> None:
+    from langchain_core.messages.ai import UsageMetadata
+
+    from app.graph.workflow import TokenTally
+
+    def usage(i: int, o: int, cached: int) -> UsageMetadata:
+        return {
+            "input_tokens": i,
+            "output_tokens": o,
+            "total_tokens": i + o,
+            "input_token_details": {"cache_read": cached},
+        }
+
+    call = _call("add", {"a": 2, "b": 3})
+    call.usage_metadata = usage(1000, 20, 800)
+    answer = AIMessage(content="5", usage_metadata=usage(1100, 30, 1000))
+    tally = TokenTally()
+
+    out = await run_agent(_model(call, answer), [add], "2+3?", max_steps=5, tally=tally)
+
+    assert (tally.input, tally.output, tally.cache_read) == (2100, 50, 1800)
+    # Same totals as the finished run reports.
+    assert (out.input_tokens, out.output_tokens, out.cache_read_tokens) == (
+        2100,
+        50,
+        1800,
+    )
+
+
+@pytest.mark.anyio
+async def test_tally_keeps_what_a_failed_run_spent() -> None:
+    from app.graph.workflow import TokenTally
+
+    call = _call("add", {"a": 1, "b": 1})
+    call.usage_metadata = {
+        "input_tokens": 500,
+        "output_tokens": 10,
+        "total_tokens": 510,
+    }
+    tally = TokenTally()
+
+    # The scripted model has no reply left after the tool call: the run fails.
+    with pytest.raises(IndexError):
+        await run_agent(_model(call), [add], "1+1?", max_steps=5, tally=tally)
+
+    assert (tally.input, tally.output) == (500, 10)

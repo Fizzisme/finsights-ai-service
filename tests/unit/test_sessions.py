@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
@@ -9,7 +9,7 @@ from sqlalchemy.exc import OperationalError
 from app.api.routes import chat, sessions
 from app.graph.nodes.agent import AgentRunError, RunResult, ToolCallRecord
 from app.main import app
-from app.storage.mysql import chat_store
+from app.storage.mysql import chat_store, usage_store
 
 USER = "11111111-1111-4111-8111-111111111111"
 SID = "22222222-2222-4222-8222-222222222222"
@@ -35,6 +35,14 @@ class FakeStore:
         self.digests: list[dict[str, Any]] = []
         self.context: dict[str, Any] | None = None
         self.fail_save: Exception | None = None
+        self.usage: dict[str, Any] | None = None
+        self.charges: list[tuple[str, int]] = []
+
+    async def get_usage(self, user: str) -> dict[str, Any] | None:
+        return self.usage
+
+    async def charge(self, user: str, tokens: int, at: datetime) -> None:
+        self.charges.append((user, tokens))
 
     async def get_session(self, user: str, uid: str) -> dict[str, Any] | None:
         return self.sessions.get((user, uid))
@@ -72,6 +80,8 @@ def store(monkeypatch) -> FakeStore:
         "delete_session",
     ):
         monkeypatch.setattr(chat_store, name, getattr(fake, name))
+    monkeypatch.setattr(usage_store, "get_usage", fake.get_usage)
+    monkeypatch.setattr(usage_store, "charge", fake.charge)
     return fake
 
 
@@ -388,3 +398,86 @@ def test_stream_is_not_opened_for_a_missing_session(client, store, monkeypatch):
     other = {"X-User-Id": "33333333-3333-4333-8333-333333333333"}
     assert _stream(client, headers=other)[0] == 404
     assert calls == []
+
+
+# --- token quota ------------------------------------------------------------------------
+
+
+def _usage(
+    five_hour_tokens: int, week_tokens: int, opened: timedelta
+) -> dict[str, Any]:
+    started = usage_store.utc_now() - opened
+    return {
+        "window_started_at": started,
+        "window_tokens": five_hour_tokens,
+        "week_started_at": started,
+        "week_tokens": week_tokens,
+    }
+
+
+def _spending_agent(monkeypatch, *, error=None) -> list[dict[str, Any]]:
+    """A run that spends tokens (1000 in, 800 of them cached, 300 out), then answers or fails."""
+    calls: list[dict[str, Any]] = []
+
+    async def fake(model, tools, question, *, tally, **kwargs):
+        calls.append(kwargs)
+        tally.input, tally.output, tally.cache_read = 1000, 300, 800
+        if error:
+            raise error
+        return RunResult("Có 2 tin.", input_tokens=1000, output_tokens=300)
+
+    monkeypatch.setattr(sessions, "run_agent", fake)
+    return calls
+
+
+def test_used_up_five_hour_window_refuses_the_turn(client, store, monkeypatch):
+    calls = _stub_agent(monkeypatch, result=RunResult("x"))
+    store.usage = _usage(150_000, 150_000, opened=timedelta(hours=1))
+    response = _ask(client)
+
+    assert response.status_code == 429
+    assert response.json()["detail"]["limit"] == "five_hour"
+    assert response.json()["detail"]["resets_at"].endswith("Z")
+    # Opened an hour ago: about 4 hours left.
+    assert 4 * 3600 - 60 <= int(response.headers["Retry-After"]) <= 4 * 3600
+    assert calls == [] and store.saved == []
+
+
+def test_used_up_week_refuses_the_turn_until_the_week_resets(
+    client, store, monkeypatch
+):
+    _stub_agent(monkeypatch, result=RunResult("x"))
+    store.usage = _usage(10, 1_500_000, opened=timedelta(hours=1))
+    response = _ask(client)
+
+    assert response.status_code == 429
+    assert response.json()["detail"]["limit"] == "weekly"
+    assert int(response.headers["Retry-After"]) > 6 * 24 * 3600
+
+
+def test_stream_is_not_opened_over_quota(client, store, monkeypatch):
+    calls = _stub_agent(monkeypatch, result=RunResult("x"))
+    store.usage = _usage(150_000, 150_000, opened=timedelta(hours=1))
+    assert _stream(client)[0] == 429
+    assert calls == []
+
+
+def test_ended_window_lets_the_turn_through(client, store, monkeypatch):
+    _stub_agent(monkeypatch, result=RunResult("Có 2 tin."))
+    store.usage = _usage(10**9, 10, opened=timedelta(hours=6))
+    assert _ask(client).status_code == 200
+
+
+def test_turn_is_charged_with_cache_weighted_tokens(client, store, monkeypatch):
+    _spending_agent(monkeypatch)
+    assert _ask(client).status_code == 200
+    # 200 fresh input + 80 (a tenth of 800 cached) + 300 output.
+    assert store.charges == [(USER, 580)]
+
+
+def test_failed_turn_is_charged_and_records_its_tokens(client, store, monkeypatch):
+    _spending_agent(monkeypatch, error=AgentRunError("x"))
+    assert _ask(client).status_code == 502
+    assert store.charges == [(USER, 580)]
+    assert store.saved[0]["prompt_tokens"] == 1000
+    assert store.saved[0]["completion_tokens"] == 300

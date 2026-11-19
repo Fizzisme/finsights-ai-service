@@ -7,11 +7,12 @@ answer 404, so their existence is not revealed.
 
 import asyncio
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterable
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Any
 
 from anthropic import APIError as AnthropicAPIError
@@ -30,7 +31,7 @@ from app.core.settings import get_settings
 from app.graph import compaction
 from app.graph.history import MAX_UNFOLDED_TURNS, Context, Digest, build_digest, to_fold
 from app.graph.nodes.agent import AgentRunError, RunResult
-from app.graph.workflow import EventSink, run_agent
+from app.graph.workflow import EventSink, TokenTally, run_agent
 from app.integrations.llm.config import ModelConfigError
 from app.integrations.llm.factory import get_chat_model
 from app.schemas.runs import ToolCallTrace
@@ -41,7 +42,7 @@ from app.schemas.sessions import (
     SessionSummary,
     TurnResponse,
 )
-from app.storage.mysql import chat_store
+from app.storage.mysql import chat_store, usage_store
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 logger = logging.getLogger(__name__)
@@ -175,17 +176,62 @@ async def delete_session(user: User, session_uid: str) -> Response:
     return Response(status_code=204)
 
 
+def quota_limits() -> dict[str, int]:
+    settings = get_settings()
+    return {
+        usage_store.FIVE_HOUR: settings.quota_five_hour_tokens,
+        usage_store.WEEKLY: settings.quota_weekly_tokens,
+    }
+
+
+async def within_quota(user: User) -> None:
+    """Refuse a turn while a token quota window of the user is used up (429)."""
+    limits = quota_limits()
+    if not any(limits.values()):
+        return
+    try:
+        row = await usage_store.get_usage(user)
+    except SQLAlchemyError, RuntimeError:
+        logger.exception("loading token usage failed")
+        raise HTTPException(status_code=503, detail=UNAVAILABLE) from None
+    now = usage_store.utc_now()
+    spent = [
+        (window.resets_at, name)
+        for name, window in usage_store.windows(row, now, limits).items()
+        if window.exhausted and window.resets_at
+    ]
+    if not spent:
+        return
+    resets_at, name = max(spent)  # both used up: the later reset is the one that binds
+    raise HTTPException(
+        status_code=429,
+        detail={
+            "message": "Token quota used up.",
+            "limit": name,
+            # Naive UTC, written as GET /usage writes it.
+            "resets_at": resets_at.isoformat() + "Z",
+        },
+        headers={"Retry-After": str(math.ceil((resets_at - now).total_seconds()))},
+    )
+
+
 @dataclass
 class Conversation:
     """A session and what its earlier turns left for the next one."""
 
+    user: str
     session: dict[str, Any]
     context: Context | None
     history: list[Digest]
 
 
-async def conversation(user: User, session_uid: str) -> Conversation:
-    """Loaded before the turn starts, so a stream never opens for a missing session."""
+async def conversation(
+    user: User,
+    session_uid: str,
+    _quota: Annotated[None, Depends(within_quota)],
+) -> Conversation:
+    """Loaded before the turn starts, so a stream never opens for a missing session or a
+    used-up quota."""
     session = await _session(user, session_uid)
     try:
         context = await chat_store.latest_context(session["id"])
@@ -196,7 +242,7 @@ async def conversation(user: User, session_uid: str) -> Conversation:
     except SQLAlchemyError, RuntimeError:
         logger.exception("loading chat history failed")
         raise HTTPException(status_code=503, detail=UNAVAILABLE) from None
-    return Conversation(session, context, history)
+    return Conversation(user, session, context, history)
 
 
 ChatModel = Annotated[BaseChatModel, Depends(configured_model)]
@@ -263,6 +309,8 @@ async def _turn(
     settings = get_settings()
     model_name = getattr(model, "model_name", None) or getattr(model, "model", None)
     started = time.monotonic()
+    started_at = usage_store.utc_now()  # a new quota window opens at the turn's start
+    tally = TokenTally()
     # Fold old turns before the run, so this turn already reads the smaller history.
     checkpoint, fold_trace = await _compact(compactor, context, history, on_event)
     context = checkpoint or context
@@ -283,6 +331,7 @@ async def _turn(
                 history=history,
                 context=context,
                 on_event=on_event,
+                tally=tally,
             )
         if not result.answer.strip():
             raise AgentRunError("empty answer")
@@ -305,6 +354,8 @@ async def _turn(
                 status=chat_store.FAILED,
                 model_name=model_name,
                 error_code=code,
+                prompt_tokens=tally.input or None,
+                completion_tokens=tally.output or None,
                 ai_trace={
                     "digest": build_digest(question, detail, verified=False),
                     "latency_ms": int((time.monotonic() - started) * 1000),
@@ -314,6 +365,9 @@ async def _turn(
         except HTTPException:
             pass  # a concurrent turn won; report the run's own failure
         raise HTTPException(status_code=status, detail=detail) from None
+    finally:
+        # Every run is charged, failed or cancelled (client gone) included: tokens were spent.
+        await _charge(chat.user, tally, started_at)
 
     turn = await _save(
         session,
@@ -344,6 +398,18 @@ async def _turn(
         verified=result.verified,
         unsupported=result.unsupported,
     )
+
+
+async def _charge(user: str, tally: TokenTally, at: datetime) -> None:
+    """Count a run against the user's token quota. Losing the count must not lose the
+    answer: failures only log."""
+    tokens = usage_store.billable_tokens(tally.input, tally.output, tally.cache_read)
+    if not tokens:
+        return
+    try:
+        await usage_store.charge(user, tokens, at)
+    except SQLAlchemyError, RuntimeError:
+        logger.exception("charging token usage failed")
 
 
 async def _save(session: dict[str, Any], **turn: Any) -> int | None:
