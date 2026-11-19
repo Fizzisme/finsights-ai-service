@@ -25,13 +25,17 @@ again when none fits):
 
 import argparse
 import asyncio
+import heapq
 import json
+import math
+import operator
 import selectors
 import sys
+from array import array
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -134,7 +138,105 @@ async def like_retriever(case: Case) -> list[tuple[str, str]]:
     return [(a.article_uid, a.title) for a in result.articles]
 
 
-RETRIEVERS: dict[str, Retriever] = {"like": like_retriever}
+SNAPSHOTS = Path(__file__).resolve().parents[1] / "snapshots"
+
+
+class DenseIndex:
+    """Naive dense retrieval: one vector per article (title + summary), searched in memory.
+
+    Document vectors are cached in evals/snapshots (git-ignored) per model, dimensions and
+    period, so a rerun only embeds the questions.
+    """
+
+    def __init__(self, date_from: date, date_to: date) -> None:
+        self.date_from, self.date_to = date_from, date_to
+        self.uids: list[str] = []
+        self.titles: list[str] = []
+        self.published: list[datetime] = []
+        self.vectors: list[array[float]] = []
+
+    async def load(self) -> None:
+        from app.core.settings import get_settings
+        from app.integrations.voyage.embeddings import embed
+        from app.storage.mysql.engine import fetch_all
+        from app.tools.sql.search_news import vn_day_start_utc
+
+        rows = await fetch_all(
+            "SELECT article_uid, title, summary, published_at FROM news_articles "
+            "WHERE article_status = 'published' "
+            "AND published_at >= :start AND published_at < :end ORDER BY id",
+            {
+                "start": vn_day_start_utc(self.date_from),
+                "end": vn_day_start_utc(self.date_to + timedelta(days=1)),
+            },
+        )
+        self.uids = [r["article_uid"] for r in rows]
+        self.titles = [r["title"] for r in rows]
+        self.published = [r["published_at"] for r in rows]
+
+        settings = get_settings()
+        stem = SNAPSHOTS / (
+            f"dense_{settings.embedding_model}_{settings.embedding_dimensions}_"
+            f"{self.date_from}_{self.date_to}"
+        )
+        meta, data = stem.with_suffix(".json"), stem.with_suffix(".f32")
+        dims = settings.embedding_dimensions
+        if (
+            meta.exists()
+            and data.exists()
+            and json.loads(meta.read_text()) == self.uids
+        ):
+            flat = array("f")
+            flat.frombytes(data.read_bytes())
+            print(f"dense: {len(self.uids)} cached article vectors", file=sys.stderr)
+        else:
+            texts = [f"{r['title']}\n{r['summary'] or ''}".strip() for r in rows]
+            print(f"dense: embedding {len(texts)} articles...", file=sys.stderr)
+            result = await embed(texts, "document")
+            print(f"dense: {result.tokens} tokens", file=sys.stderr)
+            flat = array("f", (x for v in result.vectors for x in v))
+            data.write_bytes(flat.tobytes())
+            meta.write_text(json.dumps(self.uids))
+        self.vectors = [
+            _unit(flat[i * dims : (i + 1) * dims]) for i in range(len(self.uids))
+        ]
+
+    async def search(self, case: Case) -> list[tuple[str, str]]:
+        from app.integrations.voyage.embeddings import embed
+        from app.tools.sql.search_news import vn_day_start_utc
+
+        query = _unit(array("f", (await embed([case.question], "query")).vectors[0]))
+        start = vn_day_start_utc(case.date_from)
+        end = vn_day_start_utc(case.date_to + timedelta(days=1))
+        scored = [
+            (sum(map(operator.mul, query, vector)), i)
+            for i, vector in enumerate(self.vectors)
+            if start <= self.published[i] < end
+        ]
+        top = heapq.nlargest(TOP_K, scored)
+        return [(self.uids[i], self.titles[i]) for _, i in top]
+
+
+def _unit(vector: array[float]) -> array[float]:
+    """Scale to length 1, so a dot product is the cosine similarity."""
+    norm = math.sqrt(sum(x * x for x in vector)) or 1.0
+    return array("f", (x / norm for x in vector))
+
+
+_dense: dict[tuple[date, date], DenseIndex] = {}
+
+
+async def dense_retriever(case: Case) -> list[tuple[str, str]]:
+    """Voyage embedding of the question against article vectors, cosine order."""
+    key = (case.date_from, case.date_to)
+    if key not in _dense:
+        index = DenseIndex(*key)
+        await index.load()
+        _dense[key] = index
+    return await _dense[key].search(case)
+
+
+RETRIEVERS: dict[str, Retriever] = {"like": like_retriever, "dense": dense_retriever}
 
 
 async def run(retriever: Retriever, cases: list[Case]) -> dict[str, Any]:
