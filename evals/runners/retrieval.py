@@ -27,6 +27,11 @@ again when none fits):
   does not count.
 
     uv run --env-file .env python -m evals.runners.retrieval --retriever like
+
+`--dataset evals/datasets/news_topics_v2.jsonl` runs the v2 set (87 cases, September to
+20 November 2026, written by evals/builders/generate_cases.py and labelled by
+evals/builders/judge.py). Its first line is `{"max_article_id": N}`: articles collected after
+N are left out, so the corpus stays the same while the news pipeline keeps adding articles.
 """
 
 import argparse
@@ -79,12 +84,21 @@ Hit = tuple[str, str, str]
 Retriever = Callable[[Case], Awaitable[list[Hit]]]
 
 
+# The corpus limit of the loaded dataset (None: every article).
+MAX_ARTICLE_ID: int | None = None
+
+
 def load_cases(path: Path = DATASET) -> list[Case]:
+    global MAX_ARTICLE_ID
+    MAX_ARTICLE_ID = None
     cases = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         raw = json.loads(line)
+        if "max_article_id" in raw:
+            MAX_ARTICLE_ID = int(raw["max_article_id"])
+            continue
         cases.append(
             Case(
                 id=raw["id"],
@@ -161,10 +175,22 @@ async def like_retriever(case: Case) -> list[Hit]:
             limit=TOP_K,
         )
     )
-    return [
+    hits = [
         (a.article_uid, a.title, f"{a.title}\n{a.summary or ''}")
         for a in result.articles
     ]
+    if MAX_ARTICLE_ID is not None and hits:
+        from app.storage.mysql.engine import fetch_all
+
+        names = ", ".join(f":u{k}" for k in range(len(hits)))
+        rows = await fetch_all(
+            f"SELECT article_uid FROM news_articles WHERE id <= :max_id "
+            f"AND article_uid IN ({names})",
+            {"max_id": MAX_ARTICLE_ID} | {f"u{k}": h[0] for k, h in enumerate(hits)},
+        )
+        kept = {r["article_uid"] for r in rows}
+        hits = [h for h in hits if h[0] in kept]
+    return hits
 
 
 SNAPSHOTS = Path(__file__).resolve().parents[1] / "snapshots"
@@ -193,6 +219,9 @@ class DenseIndex:
         self.texts: list[str] = []  # text embedded for each vector
         self.owner: list[int] = []  # article index of each vector
         self.vectors: list[array[float]] = []
+        self.bm25: Any = None  # built on first keyword search
+        # Similarity of every vector to a question, computed once per question.
+        self._similar: dict[str, dict[int, float]] = {}
 
     async def load(self) -> None:
         from app.rag.chunking.news import (
@@ -213,10 +242,12 @@ class DenseIndex:
                 "c.body_plaintext FROM news_articles a "
                 "LEFT JOIN news_article_contents c ON c.article_id = a.id "
                 "WHERE a.article_status = 'published' AND a.id > :last "
+                "AND a.id <= :max_id "
                 "AND a.published_at >= :start AND a.published_at < :end "
                 "ORDER BY a.id LIMIT 500",
                 {
                     "last": rows[-1]["id"] if rows else 0,
+                    "max_id": MAX_ARTICLE_ID or 2**63 - 1,
                     "start": vn_day_start_utc(self.date_from),
                     "end": vn_day_start_utc(self.date_to + timedelta(days=1)),
                 },
@@ -298,21 +329,51 @@ class DenseIndex:
         return [_unit(flat[i * dims : (i + 1) * dims]) for i in range(len(texts))]
 
     async def search(
-        self, case: Case, per_article: int = 1, rerank_pool: int = 0
+        self,
+        case: Case,
+        per_article: int = 1,
+        rerank_pool: int = 0,
+        method: str = "dense",
     ) -> list[Hit]:
+        """`method`: `dense` (vector similarity), `bm25` (keywords) or `hybrid` (both, merged
+        by rank)."""
         from app.integrations.voyage.embeddings import embed
+        from app.rag.retrieval.bm25 import Bm25Index, reciprocal_rank_fusion
         from app.tools.sql.search_news import vn_day_start_utc
 
-        query = _unit(array("f", (await embed([case.question], "query")).vectors[0]))
         start = vn_day_start_utc(case.date_from)
         end = vn_day_start_utc(case.date_to + timedelta(days=1))
+
+        def in_range(item: int) -> bool:
+            return start <= self.published[self.owner[item]] < end
+
+        by_vector: dict[int, float] = {}
+        by_keyword: dict[int, float] = {}
+        if method in ("dense", "hybrid"):
+            if case.question not in self._similar:
+                query = _unit(
+                    array("f", (await embed([case.question], "query")).vectors[0])
+                )
+                self._similar[case.question] = {
+                    item: sum(map(operator.mul, query, vector))
+                    for item, vector in enumerate(self.vectors)
+                    if in_range(item)
+                }
+            by_vector = self._similar[case.question]
+        if method in ("bm25", "hybrid"):
+            if self.bm25 is None:
+                self.bm25 = Bm25Index(self.texts)
+            by_keyword = self.bm25.scores(case.question, in_range)
+        merged = {
+            "dense": by_vector,
+            "bm25": by_keyword,
+            "hybrid": reciprocal_rank_fusion([by_vector, by_keyword])
+            if method == "hybrid"
+            else {},
+        }[method]
         scored: dict[int, list[tuple[float, int]]] = defaultdict(list)
-        for item, (vector, article) in enumerate(
-            zip(self.vectors, self.owner, strict=True)
-        ):
-            if start <= self.published[article] < end:
-                similarity = sum(map(operator.mul, query, vector))
-                scored[article].append((similarity, item))
+        for item, value in merged.items():
+            scored[self.owner[item]].append((value, item))
         if rerank_pool:
             # The `rerank_pool` chunks closest to the question go to the reranker, which reads
             # question and chunk together and replaces the vector similarity as the score.
@@ -320,7 +381,7 @@ class DenseIndex:
 
             pool = heapq.nlargest(
                 rerank_pool,
-                ((sim, item) for found in scored.values() for sim, item in found),
+                ((value, item) for found in scored.values() for value, item in found),
             )
             result = await rerank(case.question, [self.texts[i] for _, i in pool])
             scored = defaultdict(list)
@@ -369,15 +430,19 @@ _dense: dict[tuple[date, date, str], DenseIndex] = {}
 
 
 def _dense_retriever(
-    mode: str, per_article: int = 1, rerank_pool: int = 0
+    mode: str, per_article: int = 1, rerank_pool: int = 0, method: str = "dense"
 ) -> Retriever:
     async def retrieve(case: Case) -> list[Hit]:
-        key = (case.date_from, case.date_to, mode)
+        # One index per calendar month, shared by the cases of that month; each case then
+        # keeps only its own period.
+        first = case.date_from.replace(day=1)
+        following = (first + timedelta(days=32)).replace(day=1)
+        key = (first, max(case.date_to, following - timedelta(days=1)), mode)
         if key not in _dense:
             index = DenseIndex(*key)
             await index.load()
             _dense[key] = index
-        return await _dense[key].search(case, per_article, rerank_pool)
+        return await _dense[key].search(case, per_article, rerank_pool, method)
 
     return retrieve
 
@@ -394,6 +459,10 @@ RETRIEVERS: dict[str, Retriever] = {
     "rerank20": _dense_retriever("chunks", 2, 20),
     "rerank40": _dense_retriever("chunks", 2, 40),
     "rerank80": _dense_retriever("chunks", 2, 80),
+    # Keywords only, and keywords + vectors merged by rank (RRF), without and with rerank.
+    "bm25": _dense_retriever("chunks", 2, 0, "bm25"),
+    "hybrid": _dense_retriever("chunks", 2, 0, "hybrid"),
+    "hybrid-rerank80": _dense_retriever("chunks", 2, 80, "hybrid"),
     "structure": _dense_retriever("structure"),
     "semantic": _dense_retriever("semantic"),
 }
@@ -430,9 +499,10 @@ def main() -> int:
     ap.add_argument("--retriever", choices=sorted(RETRIEVERS), default="like")
     ap.add_argument("--only", help="comma-separated case ids")
     ap.add_argument("--out", help="write the full report (with unjudged articles) here")
+    ap.add_argument("--dataset", type=Path, default=DATASET)
     args = ap.parse_args()
 
-    cases = load_cases()
+    cases = load_cases(args.dataset)
     if args.only:
         wanted = set(args.only.split(","))
         cases = [c for c in cases if c.id in wanted]
