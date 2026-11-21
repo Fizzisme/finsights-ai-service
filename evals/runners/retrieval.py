@@ -297,7 +297,9 @@ class DenseIndex:
             data.write_bytes(flat.tobytes())
         return [_unit(flat[i * dims : (i + 1) * dims]) for i in range(len(texts))]
 
-    async def search(self, case: Case, per_article: int = 1) -> list[Hit]:
+    async def search(
+        self, case: Case, per_article: int = 1, rerank_pool: int = 0
+    ) -> list[Hit]:
         from app.integrations.voyage.embeddings import embed
         from app.tools.sql.search_news import vn_day_start_utc
 
@@ -311,7 +313,21 @@ class DenseIndex:
             if start <= self.published[article] < end:
                 similarity = sum(map(operator.mul, query, vector))
                 scored[article].append((similarity, item))
-        # Articles rank by their best vector; the text read is its `per_article` best.
+        if rerank_pool:
+            # The `rerank_pool` chunks closest to the question go to the reranker, which reads
+            # question and chunk together and replaces the vector similarity as the score.
+            from app.integrations.voyage.rerank import rerank
+
+            pool = heapq.nlargest(
+                rerank_pool,
+                ((sim, item) for found in scored.values() for sim, item in found),
+            )
+            result = await rerank(case.question, [self.texts[i] for _, i in pool])
+            scored = defaultdict(list)
+            for index, relevance in result.ranked:
+                item = pool[index][1]
+                scored[self.owner[item]].append((relevance, item))
+        # Articles rank by their best score; the text read is its `per_article` best.
         ranked = heapq.nlargest(TOP_K, ((max(v)[0], a) for a, v in scored.items()))
         hits: list[Hit] = []
         for _, article in ranked:
@@ -352,14 +368,16 @@ def _unit(vector: array[float]) -> array[float]:
 _dense: dict[tuple[date, date, str], DenseIndex] = {}
 
 
-def _dense_retriever(mode: str, per_article: int = 1) -> Retriever:
+def _dense_retriever(
+    mode: str, per_article: int = 1, rerank_pool: int = 0
+) -> Retriever:
     async def retrieve(case: Case) -> list[Hit]:
         key = (case.date_from, case.date_to, mode)
         if key not in _dense:
             index = DenseIndex(*key)
             await index.load()
             _dense[key] = index
-        return await _dense[key].search(case, per_article)
+        return await _dense[key].search(case, per_article, rerank_pool)
 
     return retrieve
 
@@ -372,6 +390,10 @@ RETRIEVERS: dict[str, Retriever] = {
     # The same chunks, reading the best 2 or 3 of each article instead of only the best.
     "chunks-top2": _dense_retriever("chunks", 2),
     "chunks-top3": _dense_retriever("chunks", 3),
+    # Vector search finds the N closest chunks, Voyage rerank re-scores them, top 2 per article.
+    "rerank20": _dense_retriever("chunks", 2, 20),
+    "rerank40": _dense_retriever("chunks", 2, 40),
+    "rerank80": _dense_retriever("chunks", 2, 80),
     "structure": _dense_retriever("structure"),
     "semantic": _dense_retriever("semantic"),
 }
