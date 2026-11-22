@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     # Text embeddings for retrieval (app/integrations/voyage/embeddings.py).
     voyage_api_key: SecretStr = SecretStr("")
+    # Jev, a TypeSafe System One decision model (app/integrations/jev/client.py).
+    typesafe_api_key: SecretStr = SecretStr("")
     embedding_model: str = "voyage-4"
     embedding_dimensions: int = Field(default=1024, ge=256, le=2048)
 

@@ -77,6 +77,8 @@ class Score:
     mrr_at_10: float
     unjudged: list[dict[str, str]] = field(default_factory=list)
     evidence_at_5: bool | None = None  # None: the case has no evidence
+    # Characters the agent would read for the top 5: what a gate that drops chunks saves.
+    chars_at_5: int = 0
 
 
 # A retriever ranks articles for a case: [(article_uid, title, text read)], best first.
@@ -146,6 +148,7 @@ def score(case: Case, ranked: list[Hit]) -> Score:
             if case.evidence
             else None
         ),
+        chars_at_5=sum(len(text) for _, _, text in top[:HIT_K]),
     )
 
 
@@ -159,6 +162,7 @@ def summarize(scores: list[Score]) -> dict[str, Any]:
         "precision@5": round(mean(precisions), 3) if precisions else None,
         "mrr@10": round(mean(s.mrr_at_10 for s in scores), 3),
         "unjudged@10": sum(len(s.unjudged) for s in scores),
+        "chars@5": round(mean(s.chars_at_5 for s in scores)),
     }
 
 
@@ -194,6 +198,39 @@ async def like_retriever(case: Case) -> list[Hit]:
 
 
 SNAPSHOTS = Path(__file__).resolve().parents[1] / "snapshots"
+_rerank_cache: dict[str, list[tuple[int, float]]] | None = None
+
+
+async def _cached_rerank(
+    name: str,
+    question: str,
+    texts: list[str],
+    call: Callable[[str, list[str]], Awaitable[Any]],
+) -> Any:
+    """`call(question, texts)` once per (reranker, question, texts), kept in evals/snapshots.
+
+    Rerankers cost per call and give the same answer for the same input, so a rerun, or a
+    sweep of gate thresholds over the same chunks, pays once. `name` holds the model version.
+    """
+    from app.integrations.voyage.rerank import Reranked
+
+    global _rerank_cache
+    path = SNAPSHOTS / "rerank_cache.jsonl"
+    if _rerank_cache is None:
+        _rerank_cache = {}
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                _rerank_cache[row["key"]] = [(i, s) for i, s in row["ranked"]]
+    digest = hashlib.sha256("\x00".join([name, question, *texts]).encode()).hexdigest()[
+        :24
+    ]
+    if digest not in _rerank_cache:
+        result = await call(question, texts)
+        _rerank_cache[digest] = list(result.ranked)
+        with path.open("a", encoding="utf-8") as out:
+            out.write(json.dumps({"key": digest, "ranked": result.ranked}) + "\n")
+    return Reranked(_rerank_cache[digest], 0)
 
 
 class DenseIndex:
@@ -334,9 +371,14 @@ class DenseIndex:
         per_article: int = 1,
         rerank_pool: int = 0,
         method: str = "dense",
+        reranker: str = "voyage",
+        gate: float = 0.0,
     ) -> list[Hit]:
         """`method`: `dense` (vector similarity), `bm25` (keywords) or `hybrid` (both, merged
-        by rank)."""
+        by rank). `reranker`: `voyage`, or Jev asked per passage (`jev-point`) or once over the
+        whole list (`jev-list`). `gate`: when above 0, Jev is asked of every chunk in the
+        ranked results whether it answers the question; chunks scoring below `gate` are dropped,
+        and so are articles left with none. It only removes, never adds."""
         from app.integrations.voyage.embeddings import embed
         from app.rag.retrieval.bm25 import Bm25Index, reciprocal_rank_fusion
         from app.tools.sql.search_news import vn_day_start_utc
@@ -377,25 +419,62 @@ class DenseIndex:
         if rerank_pool:
             # The `rerank_pool` chunks closest to the question go to the reranker, which reads
             # question and chunk together and replaces the vector similarity as the score.
-            from app.integrations.voyage.rerank import rerank
+            from app.integrations.jev import client as jev
+            from app.integrations.voyage import rerank as voyage
 
+            rerankers = {
+                "voyage": (f"voyage:{voyage.MODEL}", voyage.rerank),
+                "jev-point": (f"jev-point:{jev.MODEL}", jev.rerank_pointwise),
+                "jev-list": (f"jev-list:{jev.MODEL}", jev.rerank_listwise),
+            }
             pool = heapq.nlargest(
                 rerank_pool,
                 ((value, item) for found in scored.values() for value, item in found),
             )
-            result = await rerank(case.question, [self.texts[i] for _, i in pool])
+            name, call = rerankers[reranker]
+            result = await _cached_rerank(
+                name, case.question, [self.texts[i] for _, i in pool], call
+            )
             scored = defaultdict(list)
             for index, relevance in result.ranked:
                 item = pool[index][1]
                 scored[self.owner[item]].append((relevance, item))
         # Articles rank by their best score; the text read is its `per_article` best.
         ranked = heapq.nlargest(TOP_K, ((max(v)[0], a) for a, v in scored.items()))
-        hits: list[Hit] = []
-        for _, article in ranked:
-            best = heapq.nlargest(per_article, scored[article])
-            text = "\n---\n".join(self.texts[item] for _, item in best)
-            hits.append((self.uids[article], self.titles[article], text))
-        return hits
+        picked = [
+            (
+                article,
+                [
+                    self.texts[i]
+                    for _, i in heapq.nlargest(per_article, scored[article])
+                ],
+            )
+            for _, article in ranked
+        ]
+        if gate:
+            from app.integrations.jev import client as jev
+
+            chunks = [chunk for _, found in picked for chunk in found]
+            verdicts = await _cached_rerank(
+                f"jev-point:{jev.MODEL}", case.question, chunks, jev.rerank_pointwise
+            )
+            relevance = dict(verdicts.ranked)
+            kept: list[tuple[int, list[str]]] = []
+            at = 0
+            for article, found in picked:
+                passing = [
+                    chunk
+                    for n, chunk in enumerate(found, start=at)
+                    if relevance[n] >= gate
+                ]
+                at += len(found)
+                if passing:
+                    kept.append((article, passing))
+            picked = kept
+        return [
+            (self.uids[article], self.titles[article], "\n---\n".join(found))
+            for article, found in picked
+        ]
 
 
 async def _fetch_blocks(article_ids: list[int]) -> dict[int, list[Any]]:
@@ -430,7 +509,12 @@ _dense: dict[tuple[date, date, str], DenseIndex] = {}
 
 
 def _dense_retriever(
-    mode: str, per_article: int = 1, rerank_pool: int = 0, method: str = "dense"
+    mode: str,
+    per_article: int = 1,
+    rerank_pool: int = 0,
+    method: str = "dense",
+    reranker: str = "voyage",
+    gate: float = 0.0,
 ) -> Retriever:
     async def retrieve(case: Case) -> list[Hit]:
         # One index per calendar month, shared by the cases of that month; each case then
@@ -442,7 +526,9 @@ def _dense_retriever(
             index = DenseIndex(*key)
             await index.load()
             _dense[key] = index
-        return await _dense[key].search(case, per_article, rerank_pool, method)
+        return await _dense[key].search(
+            case, per_article, rerank_pool, method, reranker, gate
+        )
 
     return retrieve
 
@@ -463,6 +549,15 @@ RETRIEVERS: dict[str, Retriever] = {
     "bm25": _dense_retriever("chunks", 2, 0, "bm25"),
     "hybrid": _dense_retriever("chunks", 2, 0, "hybrid"),
     "hybrid-rerank80": _dense_retriever("chunks", 2, 80, "hybrid"),
+    # The same 80 chunks re-scored by Jev: one yes/no question per chunk, or one choice over all.
+    "jev-point80": _dense_retriever("chunks", 2, 80, "dense", "jev-point"),
+    "jev-list80": _dense_retriever("chunks", 2, 80, "dense", "jev-list"),
+    # Voyage rerank 80, then Jev drops the returned chunks that do not answer the question,
+    # below the given probability.
+    "gate10": _dense_retriever("chunks", 2, 80, "dense", "voyage", 0.1),
+    "gate30": _dense_retriever("chunks", 2, 80, "dense", "voyage", 0.3),
+    "gate50": _dense_retriever("chunks", 2, 80, "dense", "voyage", 0.5),
+    "gate70": _dense_retriever("chunks", 2, 80, "dense", "voyage", 0.7),
     "structure": _dense_retriever("structure"),
     "semantic": _dense_retriever("semantic"),
 }
