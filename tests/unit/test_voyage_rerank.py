@@ -44,7 +44,7 @@ async def test_documents_come_back_best_first() -> None:
 
     assert result.ranked == [(2, 0.9), (1, 0.5), (0, 0.2)] and result.tokens == 42
     assert seen[0]["query"] == "câu hỏi" and seen[0]["documents"] == ["a", "b", "c"]
-    assert seen[0]["model"] == "rerank-2.5"
+    assert seen[0]["model"] == "rerank-3"
 
 
 @pytest.mark.anyio

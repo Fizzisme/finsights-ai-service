@@ -41,6 +41,7 @@ import heapq
 import json
 import math
 import operator
+import os
 import selectors
 import sys
 from array import array
@@ -422,8 +423,15 @@ class DenseIndex:
             from app.integrations.jev import client as jev
             from app.integrations.voyage import rerank as voyage
 
+            # RERANK_MODEL picks another Voyage reranker (say a cheaper one); the cache name
+            # carries the model, so results of different models never mix.
+            voyage_model = os.environ.get("RERANK_MODEL", voyage.MODEL)
+
+            async def voyage_rerank(query: str, texts: Sequence[str]) -> Any:
+                return await voyage.rerank(query, texts, model=voyage_model)
+
             rerankers = {
-                "voyage": (f"voyage:{voyage.MODEL}", voyage.rerank),
+                "voyage": (f"voyage:{voyage_model}", voyage_rerank),
                 "jev-point": (f"jev-point:{jev.MODEL}", jev.rerank_pointwise),
                 "jev-list": (f"jev-list:{jev.MODEL}", jev.rerank_listwise),
             }
@@ -559,6 +567,7 @@ RETRIEVERS: dict[str, Retriever] = {
     "gate50": _dense_retriever("chunks", 2, 80, "dense", "voyage", 0.5),
     "gate70": _dense_retriever("chunks", 2, 80, "dense", "voyage", 0.7),
     "structure": _dense_retriever("structure"),
+    "structure-rerank80": _dense_retriever("structure", 2, 80),
     "semantic": _dense_retriever("semantic"),
 }
 
