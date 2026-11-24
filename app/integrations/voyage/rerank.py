@@ -28,7 +28,7 @@ from app.integrations.voyage.embeddings import (
 logger = logging.getLogger(__name__)
 
 URL = "https://api.voyageai.com/v1/rerank"
-MODEL = "rerank-2.5"
+MODEL = "rerank-3"
 # API limit: at most 1,000 documents, and (query tokens x documents + document tokens) <= 600K.
 MAX_DOCUMENTS = 200
 
